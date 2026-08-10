@@ -1,330 +1,743 @@
-const http = require("node:http");
-const fs = require("node:fs");
-const path = require("node:path");
-
-const root = __dirname;
-const types = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".md": "text/markdown" };
-const PORT = process.env.PORT || 4173;
-const HOST = process.env.HOST || "127.0.0.1";
-const SEC_USER_AGENT = process.env.SEC_USER_AGENT || "CatalystRadarMVP/0.1 contact: local-dev@example.com";
-const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY || "";
-const FORMS = ["8-K", "S-1", "424B5", "424B3", "SC 13D", "SC 13G", "10-Q", "10-K"];
-
-let catalystCache = { at: 0, payload: null };
-let tickerMapCache = { at: 0, map: new Map() };
-let quoteCache = { at: 0, map: new Map(), error: null };
-
-function sendJson(res, status, payload) {
-  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-  res.end(JSON.stringify(payload));
-}
-
-function decodeXml(value = "") {
-  return value
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, "\"")
-    .replace(/&#39;/g, "'")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-async function secFetch(url) {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": SEC_USER_AGENT,
-      "Accept": "application/atom+xml,application/json,text/xml,*/*"
-    }
-  });
-  if (!response.ok) throw new Error(`SEC returned ${response.status} for ${url}`);
-  return response.text();
-}
-
-async function loadTickerMap() {
-  const day = 24 * 60 * 60 * 1000;
-  if (tickerMapCache.map.size && Date.now() - tickerMapCache.at < day) return tickerMapCache.map;
-  const text = await secFetch("https://www.sec.gov/files/company_tickers_exchange.json");
-  const json = JSON.parse(text);
-  const fields = json.fields || [];
-  const cikIndex = fields.indexOf("cik");
-  const tickerIndex = fields.indexOf("ticker");
-  const exchangeIndex = fields.indexOf("exchange");
-  const map = new Map();
-  for (const row of json.data || []) {
-    const cik = String(row[cikIndex]).padStart(10, "0");
-    const candidate = { ticker: row[tickerIndex], exchange: row[exchangeIndex] };
-    const current = map.get(cik);
-    if (!current || tickerQuality(candidate.ticker) > tickerQuality(current.ticker)) {
-      map.set(cik, candidate);
-    }
-  }
-  tickerMapCache = { at: Date.now(), map };
-  return map;
-}
-
-function tickerQuality(ticker = "") {
-  let score = 0;
-  if (!ticker.includes("-")) score += 2;
-  if (!/[WU]$|WS$|R$/.test(ticker)) score += 2;
-  if (/^[A-Z]{1,5}$/.test(ticker)) score += 2;
-  return score;
-}
-
-function parseEntries(xml, tickerMap) {
-  const entries = [];
-  const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
-  let match;
-  while ((match = entryRegex.exec(xml))) {
-    const entry = match[1];
-    const title = decodeXml((entry.match(/<title>([\s\S]*?)<\/title>/) || [])[1]);
-    const link = ((entry.match(/<link[^>]+href="([^"]+)"/) || [])[1] || "").trim();
-    const summary = decodeXml((entry.match(/<summary[^>]*>([\s\S]*?)<\/summary>/) || [])[1]);
-    const updated = ((entry.match(/<updated>([\s\S]*?)<\/updated>/) || [])[1] || "").trim();
-    const form = decodeXml(((entry.match(/<category[^>]+term="([^"]+)"/) || [])[1] || title.split(" - ")[0]).trim());
-    const accession = ((entry.match(/accession-number=([^<]+)/) || [])[1] || link.split("/").at(-1) || `${form}-${updated}`).trim();
-    const titleMatch = title.match(/^(.+?) - (.+?) \((\d{10})\)/);
-    if (!titleMatch) continue;
-    const company = titleMatch[2].replace(/\s+\(Filer\)$/i, "").trim();
-    const cik = titleMatch[3];
-    const tickerInfo = tickerMap.get(cik);
-    const classified = classifyFiling(form, summary);
-    const filedDate = (summary.match(/Filed:\s*(\d{4}-\d{2}-\d{2})/) || [])[1] || updated.slice(0, 10);
-    const ageMinutes = Math.max(0, Math.round((Date.now() - Date.parse(updated)) / 60000));
-    if (!tickerInfo?.ticker) continue;
-    entries.push({
-      id: accession,
-      symbol: tickerInfo.ticker,
-      company,
-      sector: tickerInfo?.exchange || "SEC filer",
-      category: classified.category,
-      source: form,
-      sourceUrl: link,
-      updatedIso: updated,
-      time: formatEt(updated),
-      ageMinutes,
-      headline: `${company} filed ${form}`,
-      summary: classified.summary,
-      filingSummary: summary,
-      filedDate,
-      price: null,
-      move: null,
-      volume: null,
-      float: null,
-      spread: null,
-      sentiment: classified.sentiment,
-      risk: classified.risk,
-      flags: classified.flags,
-      why: classified.why,
-      history: null,
-      live: true
-    });
-  }
-  return entries;
-}
-
-async function fetchFinnhubQuote(symbol) {
-  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`;
-  const response = await fetch(url, { headers: { "Accept": "application/json" } });
-  if (response.status === 429) throw new Error("Finnhub rate limit reached");
-  if (!response.ok) throw new Error(`Finnhub returned ${response.status}`);
-  const quote = await response.json();
-  if (!Number.isFinite(quote.c) || quote.c <= 0) return null;
-  return {
-    price: quote.c,
-    move: Number.isFinite(quote.dp) ? quote.dp : null,
-    quoteChange: Number.isFinite(quote.d) ? quote.d : null,
-    dayHigh: Number.isFinite(quote.h) ? quote.h : null,
-    dayLow: Number.isFinite(quote.l) ? quote.l : null,
-    dayOpen: Number.isFinite(quote.o) ? quote.o : null,
-    previousClose: Number.isFinite(quote.pc) ? quote.pc : null,
-    marketDataAt: quote.t ? new Date(quote.t * 1000).toISOString() : new Date().toISOString(),
-    marketDataProvider: "Finnhub"
-  };
-}
-
-async function enrichWithQuotes(catalysts) {
-  if (!FINNHUB_API_KEY) {
-    return { catalysts, marketData: { provider: null, status: "missing-key", message: "Set FINNHUB_API_KEY to enable quote enrichment." } };
-  }
-
-  const now = Date.now();
-  if (quoteCache.map.size && now - quoteCache.at < 60_000) {
-    return { catalysts: applyQuotes(catalysts, quoteCache.map), marketData: { provider: "Finnhub", status: "cached", error: quoteCache.error } };
-  }
-
-  const symbols = [...new Set(catalysts.map(item => item.symbol))]
-    .filter(symbol => /^[A-Z.]{1,6}$/.test(symbol))
-    .slice(0, 30);
-  const map = new Map();
-  let error = null;
-
-  for (const symbol of symbols) {
-    try {
-      const quote = await fetchFinnhubQuote(symbol);
-      if (quote) map.set(symbol, quote);
-    } catch (quoteError) {
-      error = quoteError.message;
-      if (quoteError.message.includes("rate limit")) break;
-    }
-    await new Promise(resolve => setTimeout(resolve, 120));
-  }
-
-  quoteCache = { at: Date.now(), map, error };
-  return {
-    catalysts: applyQuotes(catalysts, map),
-    marketData: {
-      provider: "Finnhub",
-      status: map.size ? "live" : "unavailable",
-      enrichedSymbols: map.size,
-      requestedSymbols: symbols.length,
-      error
-    }
-  };
-}
-
-function applyQuotes(catalysts, quoteMap) {
-  return catalysts.map(item => {
-    const quote = quoteMap.get(item.symbol);
-    if (!quote) return item;
-    return {
-      ...item,
-      ...quote,
-      flags: item.flags
-        .filter(flag => flag !== "Market reaction needs price data")
-        .concat(["Quote data connected"]),
-      why: item.why
-        .filter(reason => reason !== "Needs price and volume confirmation")
-        .concat([Number.isFinite(quote.move) ? `Quote reaction is ${quote.move.toFixed(1)}%` : "Current quote is connected"])
-    };
-  });
-}
-
-function classifyFiling(form, summary) {
-  const text = `${form} ${summary}`.toLowerCase();
-  if (form.startsWith("S-1") || form.startsWith("424B")) {
-    return {
-      category: "Offering / Dilution",
-      sentiment: "Negative",
-      risk: "High",
-      flags: ["Potential dilution", "Primary SEC filing", "Market reaction needs price data"],
-      summary: "This filing may relate to securities registration or an offering. These can pressure a stock if investors expect dilution.",
-      why: ["Primary-source SEC filing", "Financing terms can change investor expectations", "Needs price and volume confirmation"]
-    };
-  }
-  if (form.startsWith("SC 13")) {
-    return {
-      category: "Ownership / Activist",
-      sentiment: "Watch",
-      risk: "Medium",
-      flags: ["Ownership change", "Possible activist interest", "Read filing details"],
-      summary: "Ownership filings can matter when a new large holder, activist, or strategic investor appears.",
-      why: ["Primary-source ownership filing", "May reveal new investor intent", "Needs issuer and holder context"]
-    };
-  }
-  if (text.includes("item 2.02") || form === "10-Q" || form === "10-K") {
-    return {
-      category: "Earnings / Guidance",
-      sentiment: "Watch",
-      risk: "Medium",
-      flags: ["Financial results", "Guidance may be inside exhibits", "Market reaction needs confirmation"],
-      summary: "Financial results and guidance updates can change forward expectations, but the direction depends on the actual numbers.",
-      why: ["Primary-source financial filing", "Investors often react to guidance and margins", "Needs comparison to expectations"]
-    };
-  }
-  if (text.includes("item 1.01")) {
-    return {
-      category: "Material Agreement",
-      sentiment: "Watch",
-      risk: "Medium",
-      flags: ["Agreement terms may be undisclosed", "Materiality requires context"],
-      summary: "Material definitive agreements can move stocks when the deal is large, strategic, or changes the company's business outlook.",
-      why: ["Filed as a material agreement", "Could signal a contract, financing, or partnership", "Needs details from the filing"]
-    };
-  }
-  if (text.includes("item 5.02")) {
-    return {
-      category: "Management Change",
-      sentiment: "Watch",
-      risk: "Medium",
-      flags: ["Leadership change", "Context matters", "May be routine"],
-      summary: "Leadership changes can matter if a key executive resigns, a turnaround CEO joins, or compensation terms reveal incentives.",
-      why: ["Primary-source governance event", "Can change investor confidence", "Needs reason for departure or appointment"]
-    };
-  }
-  return {
-    category: "Other Filing",
-    sentiment: "Watch",
+const catalysts = [
+  {
+    id: "evt-001",
+    symbol: "NRGX",
+    company: "Norex Genomics",
+    sector: "Biotech",
+    category: "FDA / Biotech",
+    source: "FDA update",
+    time: "09:37 ET",
+    ageMinutes: 8,
+    headline: "FDA grants Fast Track designation to Norex's lead rare-disease candidate",
+    summary: "Fast Track can shorten review timelines and usually brings speculative attention to smaller biotech names.",
+    price: 3.17,
+    move: 71.4,
+    volume: 12.1,
+    float: 7.8,
+    spread: 1.3,
+    sentiment: "Positive",
+    risk: "High",
+    flags: ["Small float", "Halt risk", "Biotech binary event"],
+    why: ["Fresh regulatory catalyst", "Price and volume reacting immediately", "Low float can amplify volatility"],
+    history: { similar: 42, medianMove: 18.6, faded: 57 },
+    watch: false
+  },
+  {
+    id: "evt-002",
+    symbol: "BLZE",
+    company: "Blaze BioSystems",
+    sector: "Biotech",
+    category: "Clinical Data",
+    source: "Press release",
+    time: "09:44 ET",
+    ageMinutes: 14,
+    headline: "Blaze reports positive interim Phase 2 oncology data",
+    summary: "Interim trial data can move biotech stocks sharply, especially when the company has a small float and no prior leak.",
+    price: 6.42,
+    move: 42.8,
+    volume: 8.7,
+    float: 12.4,
+    spread: 0.6,
+    sentiment: "Positive",
+    risk: "High",
+    flags: ["Trial data", "Prior offering history", "Large opening gap"],
+    why: ["Event is directly tied to company value", "Relative volume confirms attention", "Spread is still tradeable in simulation"],
+    history: { similar: 31, medianMove: 14.2, faded: 48 },
+    watch: false
+  },
+  {
+    id: "evt-003",
+    symbol: "QNTM",
+    company: "Quantum Mobility",
+    sector: "Industrials",
+    category: "Contract Win",
+    source: "8-K filing",
+    time: "10:02 ET",
+    ageMinutes: 22,
+    headline: "Quantum Mobility signs multi-year autonomous fleet supply agreement",
+    summary: "Large customer contracts matter when the deal size is material compared with the company's trailing revenue.",
+    price: 11.84,
+    move: 18.2,
+    volume: 5.4,
+    float: 22.1,
+    spread: 0.9,
+    sentiment: "Positive",
+    risk: "Medium",
+    flags: ["Contract value undisclosed", "Needs revenue context"],
+    why: ["Filed as material agreement", "Price held above premarket high", "Volume is above normal"],
+    history: { similar: 58, medianMove: 7.4, faded: 41 },
+    watch: false
+  },
+  {
+    id: "evt-004",
+    symbol: "ARCV",
+    company: "Arcview Robotics",
+    sector: "Technology",
+    category: "Earnings / Guidance",
+    source: "Earnings release",
+    time: "08:12 ET",
+    ageMinutes: 103,
+    headline: "Arcview raises full-year revenue guidance after record bookings",
+    summary: "Guidance raises tend to matter more than backward-looking earnings because they change forward expectations.",
+    price: 8.09,
+    move: 11.6,
+    volume: 3.8,
+    float: 28.6,
+    spread: 1.1,
+    sentiment: "Positive",
+    risk: "Medium",
+    flags: ["Post-earnings volatility", "Needs margin check"],
+    why: ["Guidance changed", "Bookings strength supports narrative", "Move is strong but not yet extreme"],
+    history: { similar: 73, medianMove: 6.1, faded: 36 },
+    watch: false
+  },
+  {
+    id: "evt-005",
+    symbol: "MIRA",
+    company: "Mirador AI",
+    sector: "Technology",
+    category: "Social / Rumor",
+    source: "Social trend",
+    time: "10:18 ET",
+    ageMinutes: 11,
+    headline: "Mirador AI trends after unverified acquisition chatter",
+    summary: "Rumor-driven moves can be explosive but often reverse when there is no confirmed filing or company statement.",
+    price: 4.88,
+    move: 27.2,
+    volume: 6.1,
+    float: 18.3,
+    spread: 2.2,
+    sentiment: "Unverified",
+    risk: "Very High",
+    flags: ["No primary source", "Wide spread", "Rumor risk"],
+    why: ["Market is reacting", "Source quality is weak", "The spread makes execution expensive"],
+    history: { similar: 64, medianMove: 9.2, faded: 69 },
+    watch: false
+  },
+  {
+    id: "evt-006",
+    symbol: "OMNI",
+    company: "OmniCell Energy",
+    sector: "Energy",
+    category: "Offering / Dilution",
+    source: "S-1 filing",
+    time: "07:51 ET",
+    ageMinutes: 124,
+    headline: "OmniCell files mixed shelf registration for up to $150M",
+    summary: "Shelf registrations can pressure stocks because investors anticipate future dilution, especially when cash is tight.",
+    price: 2.64,
+    move: -16.8,
+    volume: 4.9,
+    float: 34.2,
+    spread: 1.4,
+    sentiment: "Negative",
+    risk: "High",
+    flags: ["Potential dilution", "Cash runway concern", "Downside catalyst"],
+    why: ["Primary filing source", "Price reaction is negative", "Volume confirms investors noticed"],
+    history: { similar: 88, medianMove: -8.9, faded: 52 },
+    watch: false
+  },
+  {
+    id: "evt-007",
+    symbol: "VOLT",
+    company: "VoltForge Systems",
+    sector: "Industrials",
+    category: "Government Award",
+    source: "Agency notice",
+    time: "10:26 ET",
+    ageMinutes: 3,
+    headline: "VoltForge named awardee in $92M grid modernization contract",
+    summary: "Government contract awards can move smaller industrial names when the award is large relative to annual revenue.",
+    price: 14.31,
+    move: 9.7,
+    volume: 2.9,
+    float: 41.5,
+    spread: 0.7,
+    sentiment: "Positive",
+    risk: "Medium",
+    flags: ["Award details pending", "Revenue recognition unclear"],
+    why: ["Fresh award notice", "Stock is beginning to react", "Move is early compared with other alerts"],
+    history: { similar: 49, medianMove: 5.8, faded: 33 },
+    watch: false
+  },
+  {
+    id: "evt-008",
+    symbol: "STLR",
+    company: "Stellar Materials",
+    sector: "Materials",
+    category: "Analyst Action",
+    source: "Analyst note",
+    time: "09:05 ET",
+    ageMinutes: 41,
+    headline: "Stellar upgraded to Buy with price target raised 45%",
+    summary: "Analyst upgrades can move stocks, but they are usually weaker catalysts than filings, earnings, or confirmed deals.",
+    price: 23.71,
+    move: 6.4,
+    volume: 2.2,
+    float: 61.4,
+    spread: 0.4,
+    sentiment: "Positive",
     risk: "Low",
-    flags: ["Read filing details", "May be routine", "Market reaction needs confirmation"],
-    summary: "This is a fresh SEC filing. It may be routine or important depending on the item text and exhibits.",
-    why: ["Primary-source SEC update", "Fresh information reached the market", "Needs classification and reaction data"]
-  };
-}
-
-function formatEt(iso) {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Unknown";
-  return date.toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hour12: false }) + " ET";
-}
-
-async function loadCatalysts() {
-  if (catalystCache.payload && Date.now() - catalystCache.at < 60_000) return catalystCache.payload;
-  const tickerMap = await loadTickerMap();
-  const filings = [];
-  for (const form of FORMS) {
-    const url = `https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=${encodeURIComponent(form)}&owner=include&count=20&output=atom`;
-    const xml = await secFetch(url);
-    filings.push(...parseEntries(xml, tickerMap));
+    flags: ["Secondary catalyst", "Large float"],
+    why: ["Positive revision", "Lower volatility profile", "Reaction is confirmed but moderate"],
+    history: { similar: 112, medianMove: 3.1, faded: 29 },
+    watch: false
   }
-  const seen = new Set();
-  const catalysts = filings
-    .filter(item => item.sourceUrl && !seen.has(item.id) && seen.add(item.id))
-    .sort((a, b) => Date.parse(b.updatedIso) - Date.parse(a.updatedIso))
-    .slice(0, 80);
-  const enriched = await enrichWithQuotes(catalysts);
-  const payload = {
-    mode: enriched.marketData.provider && enriched.marketData.status !== "missing-key" ? "live-sec-quotes" : "live-sec",
-    generatedAt: new Date().toISOString(),
-    count: enriched.catalysts.length,
-    marketData: enriched.marketData,
-    catalysts: enriched.catalysts
-  };
-  catalystCache = { at: Date.now(), payload };
-  return payload;
+];
+
+const defaults = {
+  category: "All",
+  minimumMove: 0,
+  minimumVolume: 0,
+  maxAge: 10080,
+  requirePrimary: true,
+  hideRumors: false,
+  includeNegative: true
+};
+
+let selectedId = "evt-001";
+let scanning = true;
+let soundOn = true;
+let dataMode = "demo";
+let watchlist = JSON.parse(localStorage.getItem("catalyst-radar-watchlist") || "[]");
+let notes = JSON.parse(localStorage.getItem("catalyst-radar-notes") || "[]");
+let studies = JSON.parse(localStorage.getItem("catalyst-radar-studies") || "[]");
+let activeView = "start";
+
+const $ = (id) => document.getElementById(id);
+const money = (n) => Number.isFinite(n) ? `$${Number(n).toFixed(2)}` : "—";
+const signed = (n, suffix = "%") => Number.isFinite(n) ? `${n > 0 ? "+" : ""}${n.toFixed(1)}${suffix}` : "Pending";
+const metric = (n, suffix = "") => Number.isFinite(n) ? `${Number(n).toFixed(1)}${suffix}` : "Pending";
+
+function displayTime(event) {
+  if (event.ageMinutes < 1440 || !event.updatedIso) return event.time;
+  const date = new Date(event.updatedIso);
+  return Number.isNaN(date.getTime()) ? event.time : date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
-http.createServer(async (req, res) => {
-  const url = new URL(req.url, "http://127.0.0.1:4173");
-  if (url.pathname === "/health") {
-    sendJson(res, 200, { ok: true, service: "catalyst-radar", mode: catalystCache.payload?.mode || "starting" });
-    return;
-  }
-  if (url.pathname === "/api/catalysts") {
-    try {
-      sendJson(res, 200, await loadCatalysts());
-    } catch (error) {
-      sendJson(res, 502, { mode: "error", error: error.message, generatedAt: new Date().toISOString(), catalysts: [] });
+function beginnerContext(event) {
+  const contexts = {
+    "Offering / Dilution": {
+      label: "Risk alert",
+      tone: "danger",
+      title: "The company may be issuing more shares.",
+      explanation: "More shares can reduce each existing shareholder's ownership percentage and may pressure the stock. The filing terms determine how important it is.",
+      next: "Find the offering size, price, and intended use of the cash in the SEC filing."
+    },
+    "Ownership / Activist": {
+      label: "Ownership change",
+      tone: "attention",
+      title: "A large investor reported a position.",
+      explanation: "This can matter when the investor may influence management or believes the company is undervalued. Not every ownership filing is activist activity.",
+      next: "Identify the investor, ownership percentage, and stated purpose of the position."
+    },
+    "Earnings / Guidance": {
+      label: "Financial update",
+      tone: "positive",
+      title: "The company's financial picture changed.",
+      explanation: "Revenue, profit, margins, or guidance can reset investor expectations. The direction cannot be known from the form name alone.",
+      next: "Compare results and guidance with the prior period and market expectations."
+    },
+    "Material Agreement": {
+      label: "Business event",
+      tone: "positive",
+      title: "The company disclosed an important agreement.",
+      explanation: "The agreement could be a contract, partnership, acquisition, or financing. Its value depends on the actual terms and size relative to the company.",
+      next: "Read Item 1.01 and determine who the counterparty is, what changed, and whether dollar terms are disclosed."
+    },
+    "Management Change": {
+      label: "Leadership update",
+      tone: "attention",
+      title: "A director or executive role changed.",
+      explanation: "Leadership changes can be routine or meaningful. The reason, replacement, and timing matter more than the headline by itself.",
+      next: "Check who left or joined, why the change happened, and whether it was planned."
+    },
+    "Other Filing": {
+      label: "Needs context",
+      tone: "neutral",
+      title: "A new filing arrived, but its importance is not clear yet.",
+      explanation: "Many SEC filings are routine. Treat this as a prompt to inspect the document, not as evidence that the stock should move.",
+      next: "Open the filing and identify the specific 8-K item or exhibit before spending more time on it."
     }
+  };
+  return contexts[event.category] || {
+    label: "Research next",
+    tone: "attention",
+    title: "New information may be affecting the company.",
+    explanation: event.summary,
+    next: "Confirm the original source, then check whether price and volume reacted after the event."
+  };
+}
+
+function setView(view, scroll = true) {
+  activeView = ["start", "radar", "research"].includes(view) ? view : "start";
+  document.querySelectorAll(".app-view").forEach(panel => {
+    panel.hidden = panel.id !== `view-${activeView}`;
+  });
+  document.querySelectorAll(".nav-tab").forEach(button => {
+    button.classList.toggle("active", button.dataset.view === activeView);
+  });
+  document.body.dataset.view = activeView;
+  if (scroll) {
+    const marketStrip = document.querySelector(".market-strip");
+    const margin = Number.parseFloat(window.getComputedStyle(marketStrip).marginBottom) || 0;
+    const navigationTop = marketStrip.offsetTop + marketStrip.offsetHeight + margin;
+    window.scrollTo({ top: Math.max(0, navigationTop - 64), behavior: "smooth" });
+  }
+}
+
+function renderBeginnerShortlist() {
+  const uniqueSymbols = new Set();
+  const shortlist = catalysts
+    .filter(event => event.ageMinutes <= 10080 && primarySource(event))
+    .sort((a, b) => reactionScore(b) - reactionScore(a))
+    .filter(event => !uniqueSymbols.has(event.symbol) && uniqueSymbols.add(event.symbol))
+    .slice(0, 4);
+
+  $("nav-radar-count").textContent = catalysts.length;
+  $("beginner-shortlist").innerHTML = shortlist.length ? shortlist.map(event => {
+    const context = beginnerContext(event);
+    return `<article class="queue-card">
+      <div class="queue-card-top"><span class="queue-label ${context.tone}">${context.label}</span><span class="queue-time">${displayTime(event)}</span></div>
+      <div class="queue-symbol"><div><strong>${event.symbol}</strong><span>${event.company}</span></div><b>${reactionScore(event)}<small> rank</small></b></div>
+      <h3>${context.title}</h3>
+      <p>${context.explanation}</p>
+      <div class="queue-metrics"><span>Day move <b class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</b></span><span>Source <b>${event.source}</b></span></div>
+      <button data-explain-id="${event.id}">Explain this filing</button>
+    </article>`;
+  }).join("") : `<div class="journal-empty">The feed is connected, but there are no recent primary-source filings in the current seven-day window.</div>`;
+
+  document.querySelectorAll("[data-explain-id]").forEach(button => {
+    button.addEventListener("click", () => {
+      selectedId = button.dataset.explainId;
+      setView("radar");
+      renderRadar();
+      selectEvent(selectedId);
+    });
+  });
+}
+
+function getFilters() {
+  return {
+    category: $("category-filter").value,
+    minimumMove: +$("min-move").value,
+    minimumVolume: +$("min-volume").value,
+    maxAge: +$("max-age").value,
+    requirePrimary: $("require-primary").checked,
+    hideRumors: $("hide-rumors").checked,
+    includeNegative: $("include-negative").checked
+  };
+}
+
+function primarySource(event) {
+  return !["Social trend", "Analyst note"].includes(event.source);
+}
+
+function reactionScore(event) {
+  const source = primarySource(event) ? 20 : 8;
+  const freshness = Math.max(4, 20 - event.ageMinutes / 9);
+  const price = Number.isFinite(event.move) ? Math.min(25, Math.abs(event.move) * 1.2) : 0;
+  const volume = Number.isFinite(event.volume) ? Math.min(20, event.volume * 2.3) : 0;
+  const execution = Number.isFinite(event.spread) ? Math.max(2, 15 - event.spread * 4) : 6;
+  const filingWeight = event.live ? 12 : 0;
+  return Math.round(Math.min(99, source + freshness + price + volume + execution + filingWeight));
+}
+
+function historicalLabel(event) {
+  if (!event.history) return "Historical reaction testing is not connected yet";
+  if (event.history.medianMove > 10) return "Strong historical reaction";
+  if (event.history.medianMove < -5) return "Historically negative";
+  if (event.history.faded > 60) return "Often fades";
+  return "Moderate historical reaction";
+}
+
+function matches(event, f) {
+  return (f.category === "All" || event.category === f.category) &&
+    (f.minimumMove === 0 || (Number.isFinite(event.move) && Math.abs(event.move) >= f.minimumMove)) &&
+    (f.minimumVolume === 0 || (Number.isFinite(event.volume) && event.volume >= f.minimumVolume)) &&
+    event.ageMinutes <= f.maxAge &&
+    (!f.requirePrimary || primarySource(event)) &&
+    (!f.hideRumors || event.sentiment !== "Unverified") &&
+    (f.includeNegative || !Number.isFinite(event.move) || event.move > 0);
+}
+
+function renderRadar() {
+  const filters = getFilters();
+  const events = catalysts.filter(event => matches(event, filters)).sort((a, b) => reactionScore(b) - reactionScore(a));
+  $("match-count").textContent = `${events.length} catalyst${events.length === 1 ? "" : "s"}`;
+  $("names-in-play").textContent = events.length;
+  $("top-catalyst").textContent = events[0]?.symbol || "None";
+  $("urgent-count").textContent = catalysts.filter(event => event.ageMinutes <= 30).length;
+  $("empty-state").hidden = events.length > 0;
+  $("show-recent").hidden = events.length > 0 || filters.maxAge >= 10080;
+  if (!events.length) {
+    $("empty-title").textContent = catalysts.length ? "No catalyst matches this view." : "Waiting for the first filing.";
+    $("empty-copy").textContent = filters.maxAge < 10080
+      ? "The live feed is connected. Widen the review window to include recent filing days."
+      : "Try resetting the filters. SEC activity is often quiet on weekends and market holidays.";
+  }
+  $("radar-body").innerHTML = events.map(event => {
+    const score = reactionScore(event);
+    return `<tr data-id="${event.id}" class="${selectedId === event.id ? "selected" : ""}">
+      <td class="ticker-cell"><strong>${event.symbol}</strong><span>${event.company}</span></td>
+      <td><span class="setup-badge">${event.category}</span></td>
+      <td>${event.source}</td>
+      <td>${displayTime(event)}</td>
+      <td class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</td>
+      <td>${metric(event.volume, "x")}</td>
+      <td><span class="risk ${event.risk.toLowerCase().replace(" ", "-")}">${event.risk}</span></td>
+      <td><span class="score ${score >= 80 ? "high" : ""}">${score}</span></td>
+    </tr>`;
+  }).join("");
+
+  document.querySelectorAll("#radar-body tr").forEach(row => {
+    row.addEventListener("click", () => selectEvent(row.dataset.id));
+  });
+
+  if (selectedId && !events.some(event => event.id === selectedId)) {
+    selectedId = events[0]?.id || null;
+  }
+  if (selectedId) selectEvent(selectedId, false);
+  if (!selectedId) {
+    $("detail-content").hidden = true;
+    $("detail-placeholder").hidden = false;
+  }
+  renderBeginnerShortlist();
+}
+
+function selectEvent(id, rerender = true) {
+  selectedId = id;
+  if (rerender) renderRadar();
+  const event = catalysts.find(item => item.id === id);
+  if (!event) return;
+  const score = reactionScore(event);
+  const context = beginnerContext(event);
+  const watched = watchlist.includes(event.id);
+  const existingStudy = studies.find(study => study.id === event.id);
+  const canStartStudy = Number.isFinite(event.price) && event.price > 0;
+  const studyButtonLabel = existingStudy
+    ? existingStudy.status === "open" ? "Paper test in progress" : `Paper test logged: ${outcomeLabel(existingStudy.outcome)}`
+    : canStartStudy ? "Start 60-minute paper test" : "Live quote required for paper test";
+  $("detail-placeholder").hidden = true;
+  $("detail-content").hidden = false;
+  $("detail-content").innerHTML = `
+    <div class="detail-head">
+      <div class="detail-symbol">
+        <div><span class="company">${event.company} · ${event.sector}</span><h2>${event.symbol}</h2></div>
+        <span class="detail-rank ${score >= 80 ? "high" : ""}"><b>${score}</b><small>attention rank</small></span>
+      </div>
+      <div class="detail-price"><strong>${money(event.price)}</strong><span class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</span></div>
+      <div class="quote-source">${event.marketDataProvider ? `Current quote via ${event.marketDataProvider}` : "Quote data pending"}</div>
+    </div>
+    <div class="detail-body">
+      <h3>What happened</h3>
+      <div class="news-card">
+        <span>${event.category.toUpperCase()} · ${event.source.toUpperCase()} · ${event.filedDate || displayTime(event)}</span>
+        <p><strong>${event.headline}</strong></p>
+        <p>${event.summary}</p>
+      </div>
+
+      <div class="beginner-translation ${context.tone}">
+        <span>BEGINNER TRANSLATION · ${context.label.toUpperCase()}</span>
+        <h3>${context.title}</h3>
+        <p>${context.explanation}</p>
+      </div>
+
+      <div class="score-breakdown">
+        <h3>Why it may matter</h3>
+        ${event.why.map(item => `<div class="why-row"><i></i><span>${item}</span></div>`).join("")}
+      </div>
+
+      <div class="trade-plan">
+        <h3>Reaction snapshot</h3>
+        <div class="plan-grid">
+          <div><span>Current day move</span><strong class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</strong></div>
+          <div><span>Relative volume</span><strong>${metric(event.volume, "x")}</strong></div>
+          <div><span>Float</span><strong>${metric(event.float, "M")}</strong></div>
+          <div><span>Spread</span><strong>${metric(event.spread, "%")}</strong></div>
+          <div><span>Similar events</span><strong>${event.history?.similar || "Pending"}</strong></div>
+          <div><span>Median move</span><strong>${event.history ? signed(event.history.medianMove) : "Pending"}</strong></div>
+        </div>
+      </div>
+
+      <div class="next-checks">
+        <h3>What to check next</h3>
+        <div><b>1</b><span><strong>Read the original source</strong>${context.next}</span></div>
+        <div><b>2</b><span><strong>Confirm the market response</strong>${Number.isFinite(event.move) ? `The current day move is ${signed(event.move)}, but that does not prove this filing caused it.` : "Quote context is still pending, so do not assume the market reacted."}</span></div>
+        <div><b>3</b><span><strong>Save evidence, not a prediction</strong>Add it to your watchlist or start a paper test. The app does not place an order.</span></div>
+      </div>
+
+      <div class="risk-box">
+        <h3>Risk flags</h3>
+        <div class="flag-list">${event.flags.map(flag => `<span>${flag}</span>`).join("")}</div>
+        <p>${event.history ? `${historicalLabel(event)}. ${event.history.faded}% of similar examples gave back most of the initial move in this sample.` : `${historicalLabel(event)}. Open the SEC filing to read the source document before drawing conclusions.`}</p>
+        ${event.sourceUrl ? `<a class="source-link" href="${event.sourceUrl}" target="_blank" rel="noreferrer">Open SEC filing</a>` : ""}
+      </div>
+
+      <button class="paper-button" id="watch-button">${watched ? "Remove from watchlist" : "Add to watchlist"}</button>
+      <button class="secondary-button" id="note-button">Save research note</button>
+      <button class="study-button" id="study-button" ${existingStudy || !canStartStudy ? "disabled" : ""}>${studyButtonLabel}</button>
+      <p class="study-button-help">Records a timestamped price snapshot before the result is known. No order is placed.</p>
+    </div>`;
+  $("watch-button").addEventListener("click", () => toggleWatch(event.id));
+  $("note-button").addEventListener("click", () => saveNote(event));
+  $("study-button").addEventListener("click", () => startStudy(event));
+}
+
+function toggleWatch(id) {
+  watchlist = watchlist.includes(id) ? watchlist.filter(item => item !== id) : [id, ...watchlist];
+  localStorage.setItem("catalyst-radar-watchlist", JSON.stringify(watchlist));
+  renderWatchlist();
+  selectEvent(id);
+  toast(watchlist.includes(id) ? "Added to watchlist" : "Removed from watchlist");
+}
+
+function saveNote(event) {
+  notes.unshift({
+    id: Date.now(),
+    symbol: event.symbol,
+    category: event.category,
+    text: `${event.headline} Reaction ${signed(event.move)}, RVOL ${metric(event.volume, "x")}. Next check: did market data confirm the filing mattered?`
+  });
+  localStorage.setItem("catalyst-radar-notes", JSON.stringify(notes));
+  renderWatchlist();
+  toast("Research note saved");
+}
+
+function renderWatchlist() {
+  $("watch-count").textContent = watchlist.length;
+  $("watch-count-duplicate").textContent = watchlist.length;
+  $("note-count").textContent = notes.length;
+  $("nav-research-count").textContent = watchlist.length + notes.length + studies.length;
+  $("watchlist").innerHTML = watchlist.length ? watchlist.map(id => {
+    const event = catalysts.find(item => item.id === id);
+    if (!event) return "";
+    return `<button class="watch-card" data-id="${event.id}">
+      <strong>${event.symbol}</strong>
+      <span>${event.category}</span>
+      <b class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</b>
+    </button>`;
+  }).join("") : `<div class="journal-empty">Add catalysts here when you want to monitor whether the reaction continues or fades.</div>`;
+  document.querySelectorAll(".watch-card").forEach(card => card.addEventListener("click", () => {
+    setView("radar");
+    selectEvent(card.dataset.id);
+  }));
+
+  $("notes-list").innerHTML = notes.length ? notes.slice(0, 5).map(note => `
+    <article class="trade-card">
+      <div class="trade-card-head"><strong>${note.symbol}</strong><span>${note.category}</span></div>
+      <p>${note.text}</p>
+    </article>`).join("") : `<div class="journal-empty">Save notes from catalyst details to build a research history.</div>`;
+}
+
+function startStudy(event) {
+  if (studies.some(study => study.id === event.id)) {
+    toast("This catalyst is already in the study");
+    return;
+  }
+  if (!Number.isFinite(event.price) || event.price <= 0) {
+    toast("Connect live quotes before starting a paper test");
     return;
   }
 
-  const requested = url.pathname === "/" ? "/index.html" : url.pathname;
-  const file = path.join(root, path.normalize(requested).replace(/^(\.\.[/\\])+/, ""));
-  if (!file.startsWith(root)) {
-    res.writeHead(403).end("Forbidden");
-    return;
-  }
-  fs.readFile(file, (error, data) => {
-    if (error) {
-      res.writeHead(404).end("Not found");
+  const direction = event.move < 0 ? "Bearish" : "Bullish";
+  const multiplier = direction === "Bullish" ? 1 : -1;
+  studies.unshift({
+    id: event.id,
+    symbol: event.symbol,
+    company: event.company,
+    category: event.category,
+    score: reactionScore(event),
+    direction,
+    entryPrice: event.price,
+    targetPrice: event.price * (1 + multiplier * 0.02),
+    stopPrice: event.price * (1 - multiplier * 0.01),
+    alertAt: event.updatedIso || new Date().toISOString(),
+    startedAt: new Date().toISOString(),
+    horizonMinutes: 60,
+    status: "open",
+    outcome: null,
+    rMultiple: null
+  });
+  saveStudies();
+  renderStudy();
+  selectEvent(event.id);
+  toast("Paper test started. No trade was placed.");
+}
+
+function completeStudy(id, outcome) {
+  const resultMap = { target: 2, stop: -1, expired: 0 };
+  studies = studies.map(study => study.id === id ? {
+    ...study,
+    status: "completed",
+    outcome,
+    rMultiple: resultMap[outcome],
+    completedAt: new Date().toISOString()
+  } : study);
+  saveStudies();
+  renderStudy();
+  if (selectedId === id) selectEvent(id);
+  toast(`Paper result logged: ${outcomeLabel(outcome)}`);
+}
+
+function outcomeLabel(outcome) {
+  return { target: "Target first", stop: "Stop first", expired: "Expired" }[outcome] || "Open";
+}
+
+function saveStudies() {
+  localStorage.setItem("catalyst-radar-studies", JSON.stringify(studies));
+}
+
+function renderStudy() {
+  const completed = studies.filter(study => study.status === "completed");
+  const wins = completed.filter(study => study.outcome === "target").length;
+  const averageR = completed.length
+    ? completed.reduce((total, study) => total + study.rMultiple, 0) / completed.length
+    : null;
+  const remaining = Math.max(0, 100 - completed.length);
+
+  $("study-count").textContent = studies.length;
+  $("completed-count").textContent = `${completed.length} / 100`;
+  $("win-rate").textContent = completed.length ? `${Math.round((wins / completed.length) * 100)}%` : "Pending";
+  $("expectancy").textContent = Number.isFinite(averageR) ? `${averageR >= 0 ? "+" : ""}${averageR.toFixed(2)}R` : "Pending";
+  $("study-status").textContent = remaining ? `Need ${remaining} more completed test${remaining === 1 ? "" : "s"}` : "Baseline ready for review";
+  $("sample-progress-bar").style.width = `${Math.min(100, completed.length)}%`;
+  $("clear-study").disabled = !completed.length;
+  $("nav-research-count").textContent = watchlist.length + notes.length + studies.length;
+
+  $("study-list").innerHTML = studies.length ? studies.slice(0, 12).map(study => {
+    const completedClass = study.status === "completed" ? `result-${study.outcome}` : "result-open";
+    return `<article class="study-card ${completedClass}">
+      <div class="study-card-head">
+        <div><strong>${study.symbol}</strong><span>${study.category}</span></div>
+        <b>${study.status === "completed" ? outcomeLabel(study.outcome) : "Open"}</b>
+      </div>
+      <div class="study-card-meta">
+        <span>${study.direction}</span><span>Score ${study.score}</span><span>${new Date(study.startedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
+      </div>
+      <div class="study-prices">
+        <div><span>Entry</span><strong>${money(study.entryPrice)}</strong></div>
+        <div><span>Target</span><strong>${money(study.targetPrice)}</strong></div>
+        <div><span>Stop</span><strong>${money(study.stopPrice)}</strong></div>
+      </div>
+      ${study.status === "open" ? `<div class="outcome-actions">
+        <button class="win" data-study-id="${study.id}" data-outcome="target">Target first (+2R)</button>
+        <button class="loss" data-study-id="${study.id}" data-outcome="stop">Stop first (-1R)</button>
+        <button data-study-id="${study.id}" data-outcome="expired">Expired (0R)</button>
+      </div>` : `<p class="study-result">Recorded result: <strong>${study.rMultiple > 0 ? "+" : ""}${study.rMultiple}R</strong></p>`}
+    </article>`;
+  }).join("") : `<div class="journal-empty">Select a catalyst with a live quote, then start a paper test. The first 100 completed examples form the baseline sample.</div>`;
+
+  document.querySelectorAll("[data-study-id]").forEach(button => {
+    button.addEventListener("click", () => completeStudy(button.dataset.studyId, button.dataset.outcome));
+  });
+}
+
+function updateLabels() {
+  const f = getFilters();
+  $("move-value").textContent = `${f.minimumMove}%`;
+  $("volume-value").textContent = `${f.minimumVolume.toFixed(1)}x`;
+}
+
+function resetFilters() {
+  $("category-filter").value = defaults.category;
+  $("min-move").value = defaults.minimumMove;
+  $("min-volume").value = defaults.minimumVolume;
+  $("max-age").value = defaults.maxAge;
+  $("require-primary").checked = defaults.requirePrimary;
+  $("hide-rumors").checked = defaults.hideRumors;
+  $("include-negative").checked = defaults.includeNegative;
+  updateLabels();
+  renderRadar();
+}
+
+async function loadLiveCatalysts(showToast = false) {
+  if (!scanning) return;
+  try {
+    $("last-scan").textContent = "Checking SEC...";
+    const response = await fetch("/api/catalysts", { cache: "no-store" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Live feed failed");
+    if (payload.catalysts?.length) {
+      catalysts.splice(0, catalysts.length, ...payload.catalysts);
+      dataMode = payload.mode;
+      selectedId = catalysts.some(event => event.id === selectedId) ? selectedId : catalysts[0].id;
+      const hasQuotes = payload.marketData?.provider && ["live", "cached"].includes(payload.marketData.status);
+      $("feed-mode-label").textContent = hasQuotes ? "LIVE SEC + QUOTES" : "LIVE SEC FEED";
+      $("data-status").textContent = hasQuotes ? "SEC + Finnhub" : "Live SEC";
+      const providerNote = payload.marketData?.status === "missing-key" ? " · quotes need key" : payload.marketData?.error ? " · quote issue" : "";
+      $("last-scan").textContent = `${hasQuotes ? "SEC+quotes" : "SEC"} ${new Date(payload.generatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${providerNote}`;
+      renderRadar();
+      renderWatchlist();
+      if (showToast) toast(hasQuotes ? `Loaded ${payload.count} filings with quote enrichment` : `Loaded ${payload.count} SEC filings`);
       return;
     }
-    res.writeHead(200, { "Content-Type": types[path.extname(file)] || "application/octet-stream" });
-    res.end(data);
-  });
-}).listen(PORT, HOST, () => {
-  console.log(`Catalyst Radar running at http://${HOST}:${PORT}`);
-  console.log("Live SEC feed enabled. Set SEC_USER_AGENT to your app/contact before production use.");
+    throw new Error("No filings returned");
+  } catch (error) {
+    dataMode = "demo";
+    $("feed-mode-label").textContent = "DEMO FALLBACK";
+    $("data-status").textContent = "Demo";
+    $("last-scan").textContent = "SEC unavailable";
+    renderRadar();
+    if (showToast) toast(error.message);
+  }
+}
+
+function toast(message) {
+  $("toast").textContent = message;
+  $("toast").classList.add("show");
+  setTimeout(() => $("toast").classList.remove("show"), 2200);
+}
+
+function updateClock() {
+  const now = new Date();
+  $("market-clock").textContent = now.toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false }) + " ET";
+}
+
+document.querySelectorAll("input, select").forEach(input => input.addEventListener("input", () => {
+  updateLabels();
+  renderRadar();
+}));
+document.querySelectorAll(".nav-tab").forEach(button => {
+  button.addEventListener("click", () => setView(button.dataset.view));
 });
+$("open-radar-guide").addEventListener("click", () => setView("radar"));
+$("view-all-radar").addEventListener("click", () => setView("radar"));
+document.querySelector(".brand").addEventListener("click", event => {
+  event.preventDefault();
+  setView("start");
+});
+$("reset-filters").addEventListener("click", resetFilters);
+$("show-recent").addEventListener("click", () => {
+  $("max-age").value = "10080";
+  updateLabels();
+  renderRadar();
+});
+$("scan-toggle").addEventListener("click", () => {
+  scanning = !scanning;
+  $("scan-toggle").textContent = scanning ? "Pause feed" : "Resume feed";
+  toast(scanning ? "Feed resumed" : "Feed paused");
+  if (scanning) loadLiveCatalysts(false);
+});
+$("sound-toggle").addEventListener("click", () => {
+  soundOn = !soundOn;
+  $("sound-toggle").textContent = soundOn ? "Alerts on" : "Alerts off";
+});
+$("clear-study").addEventListener("click", () => {
+  const completedCount = studies.filter(study => study.status === "completed").length;
+  if (!completedCount || !window.confirm(`Remove ${completedCount} completed paper test${completedCount === 1 ? "" : "s"}? Open tests will remain.`)) return;
+  studies = studies.filter(study => study.status !== "completed");
+  saveStudies();
+  renderStudy();
+  toast("Completed paper tests cleared");
+});
+
+setView("start", false);
+updateLabels();
+renderRadar();
+renderWatchlist();
+renderStudy();
+updateClock();
+setInterval(updateClock, 1000);
+loadLiveCatalysts(true);
+setInterval(() => loadLiveCatalysts(false), 60000);
