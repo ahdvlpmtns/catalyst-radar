@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Catalyst Radar tracks stock-moving news, filings, and market reactions.">
+  <title>Catalyst Radar</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="Catalyst Radar home">
+      <span class="brand-mark">CR</span>
+      <span>Catalyst Radar</span>
+    </a>
+    <div class="market-status">
+      <span class="pulse"></span>
+      <span id="feed-mode-label">CONNECTING TO SEC</span>
+      <strong id="market-clock">09:42:18 ET</strong>
+    </div>
+    <div class="top-actions">
+      <button class="icon-button" id="sound-toggle" aria-label="Toggle alert sounds">Alerts on</button>
+      <button class="primary-button" id="scan-toggle">Pause feed</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Market-moving news, ranked</p>
+        <h1>What happened?<br><span>Did price react?</span></h1>
+        <p class="hero-copy">A catalyst radar for spotting filings, news, and events that move stocks. The app explains the event, confirms market reaction, and highlights risk flags without telling you what to buy.</p>
+      </div>
+      <div class="account-card">
+        <div class="account-card-head">
+          <span>Product thesis</span>
+          <span class="tag">MVP</span>
+        </div>
+        <strong>Research first</strong>
+        <div class="account-metrics">
+          <div><span>Advice given</span><b>None</b></div>
+          <div><span>Data status</span><b id="data-status">Connecting</b></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="market-strip" aria-label="Catalyst conditions">
+      <div><span>Feed health</span><strong class="positive">All systems live</strong></div>
+      <div><span>Fresh alerts</span><strong id="urgent-count">0</strong></div>
+      <div><span>Matching events</span><strong id="names-in-play">0</strong></div>
+      <div><span>Top catalyst</span><strong id="top-catalyst">—</strong></div>
+      <div><span>Watchlist</span><strong id="watch-count">0</strong></div>
+    </section>
+
+    <section class="workspace">
+      <aside class="filters-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Signal controls</p>
+            <h2>Radar filters</h2>
+          </div>
+          <button class="text-button" id="reset-filters">Reset</button>
+        </div>
+
+        <label class="field">
+          <span>Catalyst category</span>
+          <select id="category-filter">
+            <option>All</option>
+            <option>FDA / Biotech</option>
+            <option>Clinical Data</option>
+            <option>Contract Win</option>
+            <option>Earnings / Guidance</option>
+            <option>Material Agreement</option>
+            <option>Management Change</option>
+            <option>Ownership / Activist</option>
+            <option>Social / Rumor</option>
+            <option>Offering / Dilution</option>
+            <option>Government Award</option>
+            <option>Analyst Action</option>
+            <option>Other Filing</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Minimum price move</span>
+          <div class="range-label"><strong id="move-value">0%</strong><small>0–40%</small></div>
+          <input id="min-move" type="range" min="0" max="40" value="0">
+        </label>
+
+        <label class="field">
+          <span>Minimum relative volume</span>
+          <div class="range-label"><strong id="volume-value">0.0x</strong><small>0–12x</small></div>
+          <input id="min-volume" type="range" min="0" max="12" value="0" step=".5">
+        </label>
+
+        <label class="field">
+          <span>Maximum alert age</span>
+          <div class="range-label"><strong id="age-value">1440m</strong><small>15m–1 day</small></div>
+          <input id="max-age" type="range" min="15" max="1440" value="1440" step="15">
+        </label>
+
+        <div class="field">
+          <span>Quality gates</span>
+          <label class="check-row"><input id="require-primary" type="checkbox" checked><i></i><span>Require primary source</span></label>
+          <label class="check-row"><input id="hide-rumors" type="checkbox"><i></i><span>Hide rumor-only alerts</span></label>
+          <label class="check-row"><input id="include-negative" type="checkbox" checked><i></i><span>Include downside catalysts</span></label>
+        </div>
+
+        <div class="risk-control">
+          <div><span>Rule of thumb</span><strong>No trade call</strong></div>
+          <p>Live SEC filings are primary-source catalysts. Quote enrichment turns on automatically when the server has a market-data API key.</p>
+        </div>
+      </aside>
+
+      <section class="scanner-panel">
+        <div class="section-heading scanner-heading">
+          <div>
+            <p class="eyebrow">Catalyst stream</p>
+            <h2>News radar</h2>
+          </div>
+          <div class="scanner-meta"><span id="match-count">0 catalysts</span><span id="last-scan">Updated now</span></div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Ticker</th><th>Catalyst</th><th>Source</th><th>Time</th><th>Move</th><th>RVOL</th><th>Risk</th><th>Score</th>
+              </tr>
+            </thead>
+            <tbody id="radar-body"></tbody>
+          </table>
+          <div class="empty-state" id="empty-state" hidden>
+            <span>QUIET TAPE</span>
+            <h3>No catalyst meets every rule.</h3>
+            <p>That is useful information. Loosen filters to research more events, or wait for cleaner evidence.</p>
+          </div>
+        </div>
+      </section>
+
+      <aside class="detail-panel" id="detail-panel">
+        <div class="detail-placeholder" id="detail-placeholder">
+          <span>SELECT A CATALYST</span>
+          <p>Review the event, market reaction, and risk flags before saving it to your research workflow.</p>
+        </div>
+        <div id="detail-content" hidden></div>
+      </aside>
+    </section>
+
+    <section class="study-section">
+      <div class="section-heading study-heading">
+        <div>
+          <p class="eyebrow">Evidence before execution</p>
+          <h2>Signal study</h2>
+          <p class="section-copy">Every candidate uses the same paper-test rule: record the alert price, then track a +2% target, a -1% stop, or a 60-minute expiration. This measures the scanner; it is not a trade recommendation.</p>
+        </div>
+        <div class="study-status" id="study-status">Need 100 completed tests</div>
+      </div>
+
+      <div class="study-metrics">
+        <div><span>Candidates</span><strong id="study-count">0</strong></div>
+        <div><span>Completed</span><strong id="completed-count">0 / 100</strong></div>
+        <div><span>Win rate</span><strong id="win-rate">Pending</strong></div>
+        <div><span>Average result</span><strong id="expectancy">Pending</strong></div>
+      </div>
+      <div class="sample-progress" aria-label="Progress toward 100 completed paper tests"><i id="sample-progress-bar"></i></div>
+
+      <div class="study-grid">
+        <div class="protocol-card">
+          <span class="protocol-label">BASELINE PROTOCOL V1</span>
+          <h3>One rule for every alert</h3>
+          <div class="protocol-steps">
+            <div><b>1</b><span>Snapshot</span><p>Record price, catalyst score, and alert time before knowing the result.</p></div>
+            <div><b>2</b><span>Observe</span><p>Track +2%, -1%, and a fixed 60-minute maximum horizon.</p></div>
+            <div><b>3</b><span>Label</span><p>Record which threshold happened first, including expired tests.</p></div>
+          </div>
+          <p class="protocol-note">A live quote is required to start a valid test. Relative volume and automatic outcome checks come in the historical-data milestone.</p>
+        </div>
+        <div>
+          <div class="study-list-head">
+            <h3>Paper-test log</h3>
+            <button class="text-button" id="clear-study">Clear completed</button>
+          </div>
+          <div class="study-list" id="study-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="journal-section">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Research workflow</p>
+          <h2>Watchlist and notes</h2>
+        </div>
+        <div class="journal-stats">
+          <div><span>Watched</span><strong id="watch-count-duplicate">0</strong></div>
+          <div><span>Notes</span><strong id="note-count">0</strong></div>
+          <div><span>Status</span><strong>Researching</strong></div>
+        </div>
+      </div>
+      <div class="two-column">
+        <div>
+          <h3>Watchlist</h3>
+          <div class="journal-list compact" id="watchlist"></div>
+        </div>
+        <div>
+          <h3>Research notes</h3>
+          <div class="journal-list compact" id="notes-list"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Educational prototype only. SEC filings may be live; quotes, historical stats, and market reactions require separate market-data connections and are not investment advice.</p>
+    <span>Catalyst Radar · MVP 0.2</span>
+  </footer>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>
