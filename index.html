@@ -61,6 +61,56 @@
       <div><span>Saved research</span><strong id="watch-count">0</strong></div>
     </section>
 
+    <nav class="workspace-nav" aria-label="Application sections">
+      <button class="nav-tab active" data-view="start"><span>01</span>Start here</button>
+      <button class="nav-tab" data-view="radar"><span>02</span>Live radar <b id="nav-radar-count">0</b></button>
+      <button class="nav-tab" data-view="research"><span>03</span>My research <b id="nav-research-count">0</b></button>
+    </nav>
+
+    <section class="app-view" id="view-start">
+      <section class="guide-panel">
+        <div class="guide-intro">
+          <p class="eyebrow">Your learning path</p>
+          <h2>You do not need to understand every number yet.</h2>
+          <p>Use the app in the same order every time. First understand the event, then confirm whether the market noticed, then save it for paper testing. Never start with the score alone.</p>
+          <div class="guide-actions">
+            <button class="guide-button" id="open-radar-guide">Open the live radar</button>
+          </div>
+        </div>
+        <div class="guide-steps">
+          <article><b>1</b><div><strong>Read what happened</strong><p>Start with the filing category and plain-language summary.</p></div></article>
+          <article><b>2</b><div><strong>Check the market response</strong><p>Look at price, day move, liquidity, and whether quote data is available.</p></div></article>
+          <article><b>3</b><div><strong>Inspect the risks</strong><p>Offerings, wide spreads, low floats, and rumors can change the whole setup.</p></div></article>
+          <article><b>4</b><div><strong>Record, then review</strong><p>Use paper tests and notes until the signal has a meaningful sample.</p></div></article>
+        </div>
+      </section>
+
+      <section class="shortlist-section">
+        <div class="section-heading start-heading">
+          <div>
+            <p class="eyebrow">Begin with a few, not eighty</p>
+            <h2>Research queue</h2>
+            <p class="section-copy">The highest-ranked recent filings, translated into a simple reason to investigate. “Highest ranked” means attention priority, not “most likely to make money.”</p>
+          </div>
+          <button class="text-button" id="view-all-radar">View all filings</button>
+        </div>
+        <div class="beginner-shortlist" id="beginner-shortlist"></div>
+      </section>
+
+      <section class="learn-section">
+        <div class="section-heading">
+          <div><p class="eyebrow">Plain-language guide</p><h2>Four terms to learn first</h2></div>
+        </div>
+        <div class="glossary-grid">
+          <article><span>Catalyst</span><strong>New information</strong><p>An event that may change how investors value a company, such as earnings, an offering, or a material agreement.</p></article>
+          <article><span>Day move</span><strong>Today’s price change</strong><p>The percentage change versus the prior close. It gives context, but does not prove the filing caused the move.</p></article>
+          <article><span>RVOL</span><strong>Relative volume</strong><p>Trading activity compared with normal. “Pending” means this data source is not connected yet.</p></article>
+          <article><span>Attention rank</span><strong>What to inspect first</strong><p>A research priority score based on source, freshness, price context, volume, and risk. It is not a win probability.</p></article>
+        </div>
+      </section>
+    </section>
+
+    <section class="app-view" id="view-radar" hidden>
     <section class="workspace">
       <aside class="filters-panel">
         <div class="section-heading">
@@ -161,7 +211,9 @@
         <div id="detail-content" hidden></div>
       </aside>
     </section>
+    </section>
 
+    <section class="app-view" id="view-research" hidden>
     <section class="study-section">
       <div class="section-heading study-heading">
         <div>
@@ -224,11 +276,12 @@
         </div>
       </div>
     </section>
+    </section>
   </main>
 
   <footer>
     <p>Educational prototype only. SEC filings may be live; quotes, historical stats, and market reactions require separate market-data connections and are not investment advice.</p>
-    <span>Catalyst Radar · MVP 0.3</span>
+    <span>Catalyst Radar · MVP 0.4.1</span>
   </footer>
 
   <div class="toast" id="toast" role="status"></div>
