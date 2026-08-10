@@ -202,6 +202,7 @@ let dataMode = "demo";
 let watchlist = JSON.parse(localStorage.getItem("catalyst-radar-watchlist") || "[]");
 let notes = JSON.parse(localStorage.getItem("catalyst-radar-notes") || "[]");
 let studies = JSON.parse(localStorage.getItem("catalyst-radar-studies") || "[]");
+let activeView = "start";
 
 const $ = (id) => document.getElementById(id);
 const money = (n) => Number.isFinite(n) ? `$${Number(n).toFixed(2)}` : "—";
@@ -212,6 +213,108 @@ function displayTime(event) {
   if (event.ageMinutes < 1440 || !event.updatedIso) return event.time;
   const date = new Date(event.updatedIso);
   return Number.isNaN(date.getTime()) ? event.time : date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function beginnerContext(event) {
+  const contexts = {
+    "Offering / Dilution": {
+      label: "Risk alert",
+      tone: "danger",
+      title: "The company may be issuing more shares.",
+      explanation: "More shares can reduce each existing shareholder's ownership percentage and may pressure the stock. The filing terms determine how important it is.",
+      next: "Find the offering size, price, and intended use of the cash in the SEC filing."
+    },
+    "Ownership / Activist": {
+      label: "Ownership change",
+      tone: "attention",
+      title: "A large investor reported a position.",
+      explanation: "This can matter when the investor may influence management or believes the company is undervalued. Not every ownership filing is activist activity.",
+      next: "Identify the investor, ownership percentage, and stated purpose of the position."
+    },
+    "Earnings / Guidance": {
+      label: "Financial update",
+      tone: "positive",
+      title: "The company's financial picture changed.",
+      explanation: "Revenue, profit, margins, or guidance can reset investor expectations. The direction cannot be known from the form name alone.",
+      next: "Compare results and guidance with the prior period and market expectations."
+    },
+    "Material Agreement": {
+      label: "Business event",
+      tone: "positive",
+      title: "The company disclosed an important agreement.",
+      explanation: "The agreement could be a contract, partnership, acquisition, or financing. Its value depends on the actual terms and size relative to the company.",
+      next: "Read Item 1.01 and determine who the counterparty is, what changed, and whether dollar terms are disclosed."
+    },
+    "Management Change": {
+      label: "Leadership update",
+      tone: "attention",
+      title: "A director or executive role changed.",
+      explanation: "Leadership changes can be routine or meaningful. The reason, replacement, and timing matter more than the headline by itself.",
+      next: "Check who left or joined, why the change happened, and whether it was planned."
+    },
+    "Other Filing": {
+      label: "Needs context",
+      tone: "neutral",
+      title: "A new filing arrived, but its importance is not clear yet.",
+      explanation: "Many SEC filings are routine. Treat this as a prompt to inspect the document, not as evidence that the stock should move.",
+      next: "Open the filing and identify the specific 8-K item or exhibit before spending more time on it."
+    }
+  };
+  return contexts[event.category] || {
+    label: "Research next",
+    tone: "attention",
+    title: "New information may be affecting the company.",
+    explanation: event.summary,
+    next: "Confirm the original source, then check whether price and volume reacted after the event."
+  };
+}
+
+function setView(view, scroll = true) {
+  activeView = ["start", "radar", "research"].includes(view) ? view : "start";
+  document.querySelectorAll(".app-view").forEach(panel => {
+    panel.hidden = panel.id !== `view-${activeView}`;
+  });
+  document.querySelectorAll(".nav-tab").forEach(button => {
+    button.classList.toggle("active", button.dataset.view === activeView);
+  });
+  document.body.dataset.view = activeView;
+  if (scroll) {
+    const marketStrip = document.querySelector(".market-strip");
+    const margin = Number.parseFloat(window.getComputedStyle(marketStrip).marginBottom) || 0;
+    const navigationTop = marketStrip.offsetTop + marketStrip.offsetHeight + margin;
+    window.scrollTo({ top: Math.max(0, navigationTop - 64), behavior: "smooth" });
+  }
+}
+
+function renderBeginnerShortlist() {
+  const uniqueSymbols = new Set();
+  const shortlist = catalysts
+    .filter(event => event.ageMinutes <= 10080 && primarySource(event))
+    .sort((a, b) => reactionScore(b) - reactionScore(a))
+    .filter(event => !uniqueSymbols.has(event.symbol) && uniqueSymbols.add(event.symbol))
+    .slice(0, 4);
+
+  $("nav-radar-count").textContent = catalysts.length;
+  $("beginner-shortlist").innerHTML = shortlist.length ? shortlist.map(event => {
+    const context = beginnerContext(event);
+    return `<article class="queue-card">
+      <div class="queue-card-top"><span class="queue-label ${context.tone}">${context.label}</span><span class="queue-time">${displayTime(event)}</span></div>
+      <div class="queue-symbol"><div><strong>${event.symbol}</strong><span>${event.company}</span></div><b>${reactionScore(event)}<small> rank</small></b></div>
+      <h3>${context.title}</h3>
+      <p>${context.explanation}</p>
+      <div class="queue-metrics"><span>Day move <b class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</b></span><span>Source <b>${event.source}</b></span></div>
+      <button data-explain-id="${event.id}">Explain this filing</button>
+    </article>`;
+  }).join("") : `<div class="journal-empty">The feed is connected, but there are no recent primary-source filings in the current seven-day window.</div>`;
+
+  document.querySelectorAll("[data-explain-id]").forEach(button => {
+    button.addEventListener("click", () => {
+      selectedId = button.dataset.explainId;
+      setView("radar");
+      renderRadar();
+      selectEvent(selectedId);
+    });
+  });
 }
 
 function getFilters() {
@@ -299,6 +402,7 @@ function renderRadar() {
     $("detail-content").hidden = true;
     $("detail-placeholder").hidden = false;
   }
+  renderBeginnerShortlist();
 }
 
 function selectEvent(id, rerender = true) {
@@ -307,6 +411,7 @@ function selectEvent(id, rerender = true) {
   const event = catalysts.find(item => item.id === id);
   if (!event) return;
   const score = reactionScore(event);
+  const context = beginnerContext(event);
   const watched = watchlist.includes(event.id);
   const existingStudy = studies.find(study => study.id === event.id);
   const canStartStudy = Number.isFinite(event.price) && event.price > 0;
@@ -319,7 +424,7 @@ function selectEvent(id, rerender = true) {
     <div class="detail-head">
       <div class="detail-symbol">
         <div><span class="company">${event.company} · ${event.sector}</span><h2>${event.symbol}</h2></div>
-        <span class="score ${score >= 80 ? "high" : ""}">${score}</span>
+        <span class="detail-rank ${score >= 80 ? "high" : ""}"><b>${score}</b><small>attention rank</small></span>
       </div>
       <div class="detail-price"><strong>${money(event.price)}</strong><span class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</span></div>
       <div class="quote-source">${event.marketDataProvider ? `Current quote via ${event.marketDataProvider}` : "Quote data pending"}</div>
@@ -330,6 +435,12 @@ function selectEvent(id, rerender = true) {
         <span>${event.category.toUpperCase()} · ${event.source.toUpperCase()} · ${event.filedDate || displayTime(event)}</span>
         <p><strong>${event.headline}</strong></p>
         <p>${event.summary}</p>
+      </div>
+
+      <div class="beginner-translation ${context.tone}">
+        <span>BEGINNER TRANSLATION · ${context.label.toUpperCase()}</span>
+        <h3>${context.title}</h3>
+        <p>${context.explanation}</p>
       </div>
 
       <div class="score-breakdown">
@@ -347,6 +458,13 @@ function selectEvent(id, rerender = true) {
           <div><span>Similar events</span><strong>${event.history?.similar || "Pending"}</strong></div>
           <div><span>Median move</span><strong>${event.history ? signed(event.history.medianMove) : "Pending"}</strong></div>
         </div>
+      </div>
+
+      <div class="next-checks">
+        <h3>What to check next</h3>
+        <div><b>1</b><span><strong>Read the original source</strong>${context.next}</span></div>
+        <div><b>2</b><span><strong>Confirm the market response</strong>${Number.isFinite(event.move) ? `The current day move is ${signed(event.move)}, but that does not prove this filing caused it.` : "Quote context is still pending, so do not assume the market reacted."}</span></div>
+        <div><b>3</b><span><strong>Save evidence, not a prediction</strong>Add it to your watchlist or start a paper test. The app does not place an order.</span></div>
       </div>
 
       <div class="risk-box">
@@ -390,6 +508,7 @@ function renderWatchlist() {
   $("watch-count").textContent = watchlist.length;
   $("watch-count-duplicate").textContent = watchlist.length;
   $("note-count").textContent = notes.length;
+  $("nav-research-count").textContent = watchlist.length + notes.length + studies.length;
   $("watchlist").innerHTML = watchlist.length ? watchlist.map(id => {
     const event = catalysts.find(item => item.id === id);
     if (!event) return "";
@@ -399,7 +518,10 @@ function renderWatchlist() {
       <b class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</b>
     </button>`;
   }).join("") : `<div class="journal-empty">Add catalysts here when you want to monitor whether the reaction continues or fades.</div>`;
-  document.querySelectorAll(".watch-card").forEach(card => card.addEventListener("click", () => selectEvent(card.dataset.id)));
+  document.querySelectorAll(".watch-card").forEach(card => card.addEventListener("click", () => {
+    setView("radar");
+    selectEvent(card.dataset.id);
+  }));
 
   $("notes-list").innerHTML = notes.length ? notes.slice(0, 5).map(note => `
     <article class="trade-card">
@@ -481,6 +603,7 @@ function renderStudy() {
   $("study-status").textContent = remaining ? `Need ${remaining} more completed test${remaining === 1 ? "" : "s"}` : "Baseline ready for review";
   $("sample-progress-bar").style.width = `${Math.min(100, completed.length)}%`;
   $("clear-study").disabled = !completed.length;
+  $("nav-research-count").textContent = watchlist.length + notes.length + studies.length;
 
   $("study-list").innerHTML = studies.length ? studies.slice(0, 12).map(study => {
     const completedClass = study.status === "completed" ? `result-${study.outcome}` : "result-open";
@@ -575,6 +698,15 @@ document.querySelectorAll("input, select").forEach(input => input.addEventListen
   updateLabels();
   renderRadar();
 }));
+document.querySelectorAll(".nav-tab").forEach(button => {
+  button.addEventListener("click", () => setView(button.dataset.view));
+});
+$("open-radar-guide").addEventListener("click", () => setView("radar"));
+$("view-all-radar").addEventListener("click", () => setView("radar"));
+document.querySelector(".brand").addEventListener("click", event => {
+  event.preventDefault();
+  setView("start");
+});
 $("reset-filters").addEventListener("click", resetFilters);
 $("show-recent").addEventListener("click", () => {
   $("max-age").value = "10080";
@@ -600,6 +732,7 @@ $("clear-study").addEventListener("click", () => {
   toast("Completed paper tests cleared");
 });
 
+setView("start", false);
 updateLabels();
 renderRadar();
 renderWatchlist();
