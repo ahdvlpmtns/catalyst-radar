@@ -29,30 +29,36 @@
 
   <main>
     <section class="hero">
-      <div>
-        <p class="eyebrow">Market-moving news, ranked</p>
-        <h1>What happened?<br><span>Did price react?</span></h1>
-        <p class="hero-copy">A catalyst radar for spotting filings, news, and events that move stocks. The app explains the event, confirms market reaction, and highlights risk flags without telling you what to buy.</p>
+      <div class="hero-content">
+        <p class="eyebrow">Live catalyst intelligence</p>
+        <h1>Find the story<br>behind the move.</h1>
+        <p class="hero-copy">Track fresh SEC filings, add current quote context, and rank what deserves a closer look. Built for research and paper testing, never blind trade calls.</p>
+        <div class="hero-badges" aria-label="Connected data sources">
+          <span><i></i>SEC filings</span>
+          <span><i></i>Finnhub quotes</span>
+          <span>60-second refresh</span>
+        </div>
       </div>
       <div class="account-card">
         <div class="account-card-head">
-          <span>Product thesis</span>
-          <span class="tag">MVP</span>
+          <span>System status</span>
+          <span class="tag">LIVE</span>
         </div>
-        <strong>Research first</strong>
+        <strong>Research workspace</strong>
         <div class="account-metrics">
-          <div><span>Advice given</span><b>None</b></div>
-          <div><span>Data status</span><b id="data-status">Connecting</b></div>
+          <div><span>Refresh cycle</span><b>60 seconds</b></div>
+          <div><span>Connections</span><b id="data-status">Connecting</b></div>
         </div>
+        <p class="account-note">Scores organize attention. They do not predict profit or place trades.</p>
       </div>
     </section>
 
     <section class="market-strip" aria-label="Catalyst conditions">
-      <div><span>Feed health</span><strong class="positive">All systems live</strong></div>
-      <div><span>Fresh alerts</span><strong id="urgent-count">0</strong></div>
-      <div><span>Matching events</span><strong id="names-in-play">0</strong></div>
-      <div><span>Top catalyst</span><strong id="top-catalyst">—</strong></div>
-      <div><span>Watchlist</span><strong id="watch-count">0</strong></div>
+      <div><span>Data feed</span><strong class="positive">Connected</strong></div>
+      <div><span>Fresh &lt;30m</span><strong id="urgent-count">0</strong></div>
+      <div><span>Current view</span><strong id="names-in-play">0</strong></div>
+      <div><span>Highest ranked</span><strong id="top-catalyst">—</strong></div>
+      <div><span>Saved research</span><strong id="watch-count">0</strong></div>
     </section>
 
     <section class="workspace">
@@ -97,9 +103,14 @@
         </label>
 
         <label class="field">
-          <span>Maximum alert age</span>
-          <div class="range-label"><strong id="age-value">1440m</strong><small>15m–1 day</small></div>
-          <input id="max-age" type="range" min="15" max="1440" value="1440" step="15">
+          <span>Review window</span>
+          <select id="max-age">
+            <option value="60">Last hour</option>
+            <option value="240">Last 4 hours</option>
+            <option value="1440">Last 24 hours</option>
+            <option value="4320">Last 3 days</option>
+            <option value="10080" selected>Last 7 days</option>
+          </select>
         </label>
 
         <div class="field">
@@ -110,8 +121,8 @@
         </div>
 
         <div class="risk-control">
-          <div><span>Rule of thumb</span><strong>No trade call</strong></div>
-          <p>Live SEC filings are primary-source catalysts. Quote enrichment turns on automatically when the server has a market-data API key.</p>
+          <div><span>Research rule</span><strong>Verify first</strong></div>
+          <p>A high score means “inspect this.” Read the filing and confirm liquidity before considering any paper test.</p>
         </div>
       </aside>
 
@@ -128,15 +139,16 @@
           <table>
             <thead>
               <tr>
-                <th>Ticker</th><th>Catalyst</th><th>Source</th><th>Time</th><th>Move</th><th>RVOL</th><th>Risk</th><th>Score</th>
+                <th>Ticker</th><th>Catalyst</th><th>Source</th><th>Time</th><th>Day move</th><th>RVOL</th><th>Risk</th><th>Rank</th>
               </tr>
             </thead>
             <tbody id="radar-body"></tbody>
           </table>
           <div class="empty-state" id="empty-state" hidden>
-            <span>QUIET TAPE</span>
-            <h3>No catalyst meets every rule.</h3>
-            <p>That is useful information. Loosen filters to research more events, or wait for cleaner evidence.</p>
+            <span>NO MATCHES</span>
+            <h3 id="empty-title">No catalyst matches this view.</h3>
+            <p id="empty-copy">Try a wider review window or reset the filters. SEC activity is often quiet on weekends and market holidays.</p>
+            <button class="empty-action" id="show-recent">Show last 7 days</button>
           </div>
         </div>
       </section>
@@ -216,7 +228,7 @@
 
   <footer>
     <p>Educational prototype only. SEC filings may be live; quotes, historical stats, and market reactions require separate market-data connections and are not investment advice.</p>
-    <span>Catalyst Radar · MVP 0.2</span>
+    <span>Catalyst Radar · MVP 0.3</span>
   </footer>
 
   <div class="toast" id="toast" role="status"></div>
