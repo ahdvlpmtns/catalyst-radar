@@ -189,7 +189,7 @@ const defaults = {
   category: "All",
   minimumMove: 0,
   minimumVolume: 0,
-  maxAge: 1440,
+  maxAge: 10080,
   requirePrimary: true,
   hideRumors: false,
   includeNegative: true
@@ -207,6 +207,12 @@ const $ = (id) => document.getElementById(id);
 const money = (n) => Number.isFinite(n) ? `$${Number(n).toFixed(2)}` : "—";
 const signed = (n, suffix = "%") => Number.isFinite(n) ? `${n > 0 ? "+" : ""}${n.toFixed(1)}${suffix}` : "Pending";
 const metric = (n, suffix = "") => Number.isFinite(n) ? `${Number(n).toFixed(1)}${suffix}` : "Pending";
+
+function displayTime(event) {
+  if (event.ageMinutes < 1440 || !event.updatedIso) return event.time;
+  const date = new Date(event.updatedIso);
+  return Number.isNaN(date.getTime()) ? event.time : date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
 
 function getFilters() {
   return {
@@ -244,8 +250,8 @@ function historicalLabel(event) {
 
 function matches(event, f) {
   return (f.category === "All" || event.category === f.category) &&
-    (!Number.isFinite(event.move) || Math.abs(event.move) >= f.minimumMove) &&
-    (!Number.isFinite(event.volume) || event.volume >= f.minimumVolume) &&
+    (f.minimumMove === 0 || (Number.isFinite(event.move) && Math.abs(event.move) >= f.minimumMove)) &&
+    (f.minimumVolume === 0 || (Number.isFinite(event.volume) && event.volume >= f.minimumVolume)) &&
     event.ageMinutes <= f.maxAge &&
     (!f.requirePrimary || primarySource(event)) &&
     (!f.hideRumors || event.sentiment !== "Unverified") &&
@@ -260,13 +266,20 @@ function renderRadar() {
   $("top-catalyst").textContent = events[0]?.symbol || "None";
   $("urgent-count").textContent = catalysts.filter(event => event.ageMinutes <= 30).length;
   $("empty-state").hidden = events.length > 0;
+  $("show-recent").hidden = events.length > 0 || filters.maxAge >= 10080;
+  if (!events.length) {
+    $("empty-title").textContent = catalysts.length ? "No catalyst matches this view." : "Waiting for the first filing.";
+    $("empty-copy").textContent = filters.maxAge < 10080
+      ? "The live feed is connected. Widen the review window to include recent filing days."
+      : "Try resetting the filters. SEC activity is often quiet on weekends and market holidays.";
+  }
   $("radar-body").innerHTML = events.map(event => {
     const score = reactionScore(event);
     return `<tr data-id="${event.id}" class="${selectedId === event.id ? "selected" : ""}">
       <td class="ticker-cell"><strong>${event.symbol}</strong><span>${event.company}</span></td>
       <td><span class="setup-badge">${event.category}</span></td>
       <td>${event.source}</td>
-      <td>${event.time}</td>
+      <td>${displayTime(event)}</td>
       <td class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</td>
       <td>${metric(event.volume, "x")}</td>
       <td><span class="risk ${event.risk.toLowerCase().replace(" ", "-")}">${event.risk}</span></td>
@@ -286,21 +299,6 @@ function renderRadar() {
     $("detail-content").hidden = true;
     $("detail-placeholder").hidden = false;
   }
-}
-
-function chartPoints(event) {
-  const price = Number.isFinite(event.price) ? event.price : 10;
-  const move = Number.isFinite(event.move) ? event.move : 0;
-  let value = price / (1 + move / 100 || 1);
-  const values = Array.from({ length: 30 }, (_, i) => {
-    const direction = move >= 0 ? 1 : -1;
-    value += direction * price * 0.0018 + Math.sin((i + event.symbol.charCodeAt(0)) * 0.85) * price * 0.0025;
-    return value;
-  });
-  values[values.length - 1] = price;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  return values.map((v, i) => `${(i / (values.length - 1)) * 286 + 2},${105 - ((v - min) / Math.max(0.01, max - min)) * 85}`).join(" ");
 }
 
 function selectEvent(id, rerender = true) {
@@ -324,17 +322,12 @@ function selectEvent(id, rerender = true) {
         <span class="score ${score >= 80 ? "high" : ""}">${score}</span>
       </div>
       <div class="detail-price"><strong>${money(event.price)}</strong><span class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</span></div>
-      <svg class="chart" viewBox="0 0 290 115" preserveAspectRatio="none" aria-label="Simulated post-catalyst price reaction chart">
-        <defs><linearGradient id="fill-${event.id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#c9ff38" stop-opacity=".32"/><stop offset="1" stop-color="#c9ff38" stop-opacity="0"/></linearGradient></defs>
-        <polygon points="2,110 ${chartPoints(event)} 288,110" fill="url(#fill-${event.id})"/>
-        <polyline points="${chartPoints(event)}" fill="none" stroke="#c9ff38" stroke-width="2"/>
-        <line x1="0" y1="82" x2="290" y2="82" stroke="#75818d" stroke-width=".6" stroke-dasharray="3 3"/>
-      </svg>
+      <div class="quote-source">${event.marketDataProvider ? `Current quote via ${event.marketDataProvider}` : "Quote data pending"}</div>
     </div>
     <div class="detail-body">
       <h3>What happened</h3>
       <div class="news-card">
-        <span>${event.category.toUpperCase()} · ${event.source.toUpperCase()} · ${event.time}</span>
+        <span>${event.category.toUpperCase()} · ${event.source.toUpperCase()} · ${event.filedDate || displayTime(event)}</span>
         <p><strong>${event.headline}</strong></p>
         <p>${event.summary}</p>
       </div>
@@ -347,7 +340,7 @@ function selectEvent(id, rerender = true) {
       <div class="trade-plan">
         <h3>Reaction snapshot</h3>
         <div class="plan-grid">
-          <div><span>Price reaction</span><strong class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</strong></div>
+          <div><span>Current day move</span><strong class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</strong></div>
           <div><span>Relative volume</span><strong>${metric(event.volume, "x")}</strong></div>
           <div><span>Float</span><strong>${metric(event.float, "M")}</strong></div>
           <div><span>Spread</span><strong>${metric(event.spread, "%")}</strong></div>
@@ -521,7 +514,6 @@ function updateLabels() {
   const f = getFilters();
   $("move-value").textContent = `${f.minimumMove}%`;
   $("volume-value").textContent = `${f.minimumVolume.toFixed(1)}x`;
-  $("age-value").textContent = `${f.maxAge}m`;
 }
 
 function resetFilters() {
@@ -549,7 +541,7 @@ async function loadLiveCatalysts(showToast = false) {
       selectedId = catalysts.some(event => event.id === selectedId) ? selectedId : catalysts[0].id;
       const hasQuotes = payload.marketData?.provider && ["live", "cached"].includes(payload.marketData.status);
       $("feed-mode-label").textContent = hasQuotes ? "LIVE SEC + QUOTES" : "LIVE SEC FEED";
-      $("data-status").textContent = hasQuotes ? "SEC + quotes" : "Live SEC";
+      $("data-status").textContent = hasQuotes ? "SEC + Finnhub" : "Live SEC";
       const providerNote = payload.marketData?.status === "missing-key" ? " · quotes need key" : payload.marketData?.error ? " · quote issue" : "";
       $("last-scan").textContent = `${hasQuotes ? "SEC+quotes" : "SEC"} ${new Date(payload.generatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${providerNote}`;
       renderRadar();
@@ -584,6 +576,11 @@ document.querySelectorAll("input, select").forEach(input => input.addEventListen
   renderRadar();
 }));
 $("reset-filters").addEventListener("click", resetFilters);
+$("show-recent").addEventListener("click", () => {
+  $("max-age").value = "10080";
+  updateLabels();
+  renderRadar();
+});
 $("scan-toggle").addEventListener("click", () => {
   scanning = !scanning;
   $("scan-toggle").textContent = scanning ? "Pause feed" : "Resume feed";
