@@ -32,7 +32,7 @@
       <div class="hero-content">
         <p class="eyebrow">Live catalyst intelligence</p>
         <h1>Find the story<br>behind the move.</h1>
-        <p class="hero-copy">Track fresh SEC filings, add current quote context, and rank what deserves a closer look. Built for research and paper testing, never blind trade calls.</p>
+        <p class="hero-copy">Track fresh SEC filings, apply one fixed evidence rule, and measure what happens afterward. Built for research and automatic paper testing, never blind trade calls.</p>
         <div class="hero-badges" aria-label="Connected data sources">
           <span><i></i>SEC filings</span>
           <span><i></i>Finnhub quotes</span>
@@ -49,63 +49,67 @@
           <div><span>Refresh cycle</span><b>60 seconds</b></div>
           <div><span>Connections</span><b id="data-status">Connecting</b></div>
         </div>
-        <p class="account-note">Scores organize attention. They do not predict profit or place trades.</p>
+        <p class="account-note">Research states organize evidence. They do not predict profit or place trades.</p>
       </div>
     </section>
 
     <section class="market-strip" aria-label="Catalyst conditions">
       <div><span>Data feed</span><strong class="positive">Connected</strong></div>
-      <div><span>Fresh &lt;30m</span><strong id="urgent-count">0</strong></div>
-      <div><span>Current view</span><strong id="names-in-play">0</strong></div>
-      <div><span>Highest ranked</span><strong id="top-catalyst">—</strong></div>
+      <div><span>Fresh filings &lt;30m</span><strong id="urgent-count">0</strong></div>
+      <div><span>Confirmed activity</span><strong id="names-in-play">0</strong></div>
+      <div><span>Completed tests</span><strong id="top-catalyst">0</strong></div>
       <div><span>Saved research</span><strong id="watch-count">0</strong></div>
     </section>
 
     <nav class="workspace-nav" aria-label="Application sections">
       <button class="nav-tab active" data-view="start"><span>01</span>Start here</button>
       <button class="nav-tab" data-view="radar"><span>02</span>Live radar <b id="nav-radar-count">0</b></button>
-      <button class="nav-tab" data-view="research"><span>03</span>My research <b id="nav-research-count">0</b></button>
+      <button class="nav-tab" data-view="research"><span>03</span>Results <b id="nav-research-count">0</b></button>
     </nav>
 
     <section class="app-view" id="view-start">
       <section class="guide-panel">
         <div class="guide-intro">
-          <p class="eyebrow">Your learning path</p>
-          <h2>You do not need to understand every number yet.</h2>
-          <p>Use the app in the same order every time. First understand the event, then confirm whether the market noticed, then save it for paper testing. Never start with the score alone.</p>
+          <p class="eyebrow">The one question</p>
+          <h2>Is there a fresh catalyst and measurable market activity?</h2>
+          <p>The app now applies one fixed research rule automatically. It separates filings that passed the rule, filings still waiting for confirmation, and filings excluded from this specific experiment.</p>
           <div class="guide-actions">
             <button class="guide-button" id="open-radar-guide">Open the live radar</button>
           </div>
         </div>
         <div class="guide-steps">
-          <article><b>1</b><div><strong>Read what happened</strong><p>Start with the filing category and plain-language summary.</p></div></article>
-          <article><b>2</b><div><strong>Check the market response</strong><p>Look at price, day move, liquidity, and whether quote data is available.</p></div></article>
-          <article><b>3</b><div><strong>Inspect the risks</strong><p>Offerings, wide spreads, low floats, and rumors can change the whole setup.</p></div></article>
-          <article><b>4</b><div><strong>Record, then review</strong><p>Use paper tests and notes until the signal has a meaningful sample.</p></div></article>
+          <article><b>1</b><div><strong>Fresh filing</strong><p>The SEC filing must be no more than 30 minutes old when evaluated.</p></div></article>
+          <article><b>2</b><div><strong>Price activity</strong><p>A newer quote and at least a +2% current-day move are required.</p></div></article>
+          <article><b>3</b><div><strong>Fixed exclusions</strong><p>Offering and dilution filings do not enter this bullish baseline.</p></div></article>
+          <article><b>4</b><div><strong>Automatic tracking</strong><p>Real quote snapshots monitor +2%, -1%, or 60 minutes without hindsight buttons.</p></div></article>
         </div>
       </section>
 
-      <section class="shortlist-section">
+      <section class="shortlist-section evidence-board-section">
         <div class="section-heading start-heading">
           <div>
-            <p class="eyebrow">Begin with a few, not eighty</p>
-            <h2>Research queue</h2>
-            <p class="section-copy">The highest-ranked recent filings, translated into a simple reason to investigate. “Highest ranked” means attention priority, not “most likely to make money.”</p>
+            <p class="eyebrow">Live evidence board</p>
+            <h2>What the fixed rule sees</h2>
+            <p class="section-copy">These are research states, not buy or sell instructions. “Confirmed” only means the app observed the required filing and price conditions.</p>
           </div>
           <button class="text-button" id="view-all-radar">View all filings</button>
         </div>
-        <div class="beginner-shortlist" id="beginner-shortlist"></div>
+        <div class="evidence-board">
+          <section class="evidence-column confirmed"><div class="evidence-column-head"><div><span>Confirmed activity</span><small>Rule passed</small></div><b id="confirmed-count">0</b></div><div class="evidence-cards" id="confirmed-list"></div></section>
+          <section class="evidence-column waiting"><div class="evidence-column-head"><div><span>Waiting</span><small>Needs confirmation</small></div><b id="waiting-count">0</b></div><div class="evidence-cards" id="waiting-list"></div></section>
+          <section class="evidence-column excluded"><div class="evidence-column-head"><div><span>Excluded from test</span><small>Fixed rule failed</small></div><b id="excluded-count">0</b></div><div class="evidence-cards" id="excluded-list"></div></section>
+        </div>
       </section>
 
       <section class="learn-section">
         <div class="section-heading">
-          <div><p class="eyebrow">Plain-language guide</p><h2>Four terms to learn first</h2></div>
+          <div><p class="eyebrow">Plain-language guide</p><h2>What each state means</h2></div>
         </div>
         <div class="glossary-grid">
-          <article><span>Catalyst</span><strong>New information</strong><p>An event that may change how investors value a company, such as earnings, an offering, or a material agreement.</p></article>
-          <article><span>Day move</span><strong>Today’s price change</strong><p>The percentage change versus the prior close. It gives context, but does not prove the filing caused the move.</p></article>
-          <article><span>RVOL</span><strong>Relative volume</strong><p>Trading activity compared with normal. “Pending” means this data source is not connected yet.</p></article>
-          <article><span>Attention rank</span><strong>What to inspect first</strong><p>A research priority score based on source, freshness, price context, volume, and risk. It is not a win probability.</p></article>
+          <article><span>Confirmed activity</span><strong>The rule passed</strong><p>A fresh filing, a newer quote, and the required current-day price move were all observed. Causation is not proven.</p></article>
+          <article><span>Waiting</span><strong>Not enough evidence</strong><p>The filing may be interesting, but a quote or the fixed price threshold is still missing.</p></article>
+          <article><span>Excluded</span><strong>Outside this experiment</strong><p>The filing is stale or conflicts with the bullish baseline. It does not mean the company is bad.</p></article>
+          <article><span>Result</span><strong>Automatically observed</strong><p>A quote snapshot reached the target or stop, or enough snapshots were collected through expiration.</p></article>
         </div>
       </section>
     </section>
@@ -189,7 +193,7 @@
           <table>
             <thead>
               <tr>
-                <th>Ticker</th><th>Catalyst</th><th>Source</th><th>Time</th><th>Day move</th><th>RVOL</th><th>Risk</th><th>Rank</th>
+                <th>Ticker</th><th>Status</th><th>Catalyst</th><th>Source</th><th>Time</th><th>Day move</th><th>Risk</th><th>Age</th>
               </tr>
             </thead>
             <tbody id="radar-body"></tbody>
@@ -218,38 +222,47 @@
       <div class="section-heading study-heading">
         <div>
           <p class="eyebrow">Evidence before execution</p>
-          <h2>Signal study</h2>
-          <p class="section-copy">Every candidate uses the same paper-test rule: record the alert price, then track a +2% target, a -1% stop, or a 60-minute expiration. This measures the scanner; it is not a trade recommendation.</p>
+          <h2>Automatic results</h2>
+          <p class="section-copy">The server records eligible alerts before the outcome is known and tracks real quote snapshots against one fixed +2% target, -1% stop, and 60-minute horizon.</p>
         </div>
-        <div class="study-status" id="study-status">Need 100 completed tests</div>
+        <div class="study-status" id="study-status">Collecting evidence</div>
       </div>
 
+      <div class="data-quality-banner" id="data-quality-banner">Quote-snapshot testing is active. Minute-bar verification is not connected.</div>
+
       <div class="study-metrics">
-        <div><span>Candidates</span><strong id="study-count">0</strong></div>
+        <div><span>Recorded filings</span><strong id="study-count">0</strong></div>
+        <div><span>Tracking now</span><strong id="tracking-count">0</strong></div>
         <div><span>Completed</span><strong id="completed-count">0 / 100</strong></div>
         <div><span>Win rate</span><strong id="win-rate">Pending</strong></div>
-        <div><span>Average result</span><strong id="expectancy">Pending</strong></div>
       </div>
       <div class="sample-progress" aria-label="Progress toward 100 completed paper tests"><i id="sample-progress-bar"></i></div>
 
-      <div class="study-grid">
-        <div class="protocol-card">
-          <span class="protocol-label">BASELINE PROTOCOL V1</span>
-          <h3>One rule for every alert</h3>
-          <div class="protocol-steps">
-            <div><b>1</b><span>Snapshot</span><p>Record price, catalyst score, and alert time before knowing the result.</p></div>
-            <div><b>2</b><span>Observe</span><p>Track +2%, -1%, and a fixed 60-minute maximum horizon.</p></div>
-            <div><b>3</b><span>Label</span><p>Record which threshold happened first, including expired tests.</p></div>
+      <div class="results-grid">
+        <div class="paper-account-card">
+          <span class="protocol-label">SIMULATED ACCOUNT · PRELIMINARY</span>
+          <h3>$1,000 fixed-rule paper account</h3>
+          <div class="paper-balance"><span>Current balance</span><strong id="paper-balance">$1,000.00</strong><b id="paper-pnl">$0.00</b></div>
+          <div class="paper-account-metrics">
+            <div><span>Average net result</span><strong id="average-result">Pending</strong></div>
+            <div><span>Max drawdown</span><strong id="max-drawdown">$0.00</strong></div>
           </div>
-          <p class="protocol-note">A live quote is required to start a valid test. Relative volume and automatic outcome checks come in the historical-data milestone.</p>
+          <p>Uses $100 per completed signal and subtracts an estimated 0.30% round-trip cost. It does not model exact bid/ask spreads, halts, taxes, or overlapping-position limits.</p>
         </div>
         <div>
           <div class="study-list-head">
-            <h3>Paper-test log</h3>
-            <button class="text-button" id="clear-study">Clear completed</button>
+            <h3>Automatic signal log</h3>
+            <span class="log-note">Newest first</span>
           </div>
           <div class="study-list" id="study-list"></div>
         </div>
+      </div>
+
+      <div class="outcome-summary">
+        <div><span>Target reached</span><strong id="target-count">0</strong></div>
+        <div><span>Stop reached</span><strong id="stop-count">0</strong></div>
+        <div><span>Expired</span><strong id="expired-count">0</strong></div>
+        <div><span>Incomplete data</span><strong id="incomplete-count">0</strong></div>
       </div>
     </section>
 
@@ -281,7 +294,7 @@
 
   <footer>
     <p>Educational prototype only. SEC filings may be live; quotes, historical stats, and market reactions require separate market-data connections and are not investment advice.</p>
-    <span>Catalyst Radar · MVP 0.4.1</span>
+    <span>Catalyst Radar · MVP 0.5</span>
   </footer>
 
   <div class="toast" id="toast" role="status"></div>
