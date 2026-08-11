@@ -10,7 +10,19 @@ A dependency-free prototype for tracking stock-moving catalysts: news, filings, 
 
 Then open `http://localhost:4173`.
 
-SEC filing alerts are fetched live through the local server with a declared User-Agent and a short cache. Quote enrichment is supported through Finnhub when `FINNHUB_API_KEY` is set. Historical stats and deeper volume analytics are still pending a fuller market-data provider. The feed, filters, catalyst detail view, watchlist, notes, signal study, polling, and local persistence are functional.
+SEC filing alerts are fetched live through the local server with a declared User-Agent and a short cache. Quote enrichment is supported through Finnhub when `FINNHUB_API_KEY` is set. Historical minute bars, true relative volume, bid/ask spreads, and float data still require a fuller market-data provider.
+
+The default review window is seven days so recent filings remain visible on weekends and market holidays. Finnhub's quote percentage is presented as the current day move, not as a measured filing-to-price reaction. The app does not display a generated price chart as though it were market history.
+
+## Evidence workflow
+
+Version 0.5 separates the app into three clear areas:
+
+- **Start Here** groups filings into Confirmed Activity, Waiting, and Excluded From Test
+- **Live Radar** contains the complete filing scanner, evidence reason, source links, risks, and plain-language explanations
+- **Results** contains the automatic signal log, sample metrics, simulated account, watchlist, and notes
+
+These states are research classifications, not buy or sell instructions. Confirmed Activity means only that the fixed filing and price gates passed; it does not prove that the filing caused the move.
 
 ## Optional quote enrichment
 
@@ -22,24 +34,31 @@ FINNHUB_API_KEY="your_finnhub_key" \
 
 Without `FINNHUB_API_KEY`, the app still runs as a live SEC filing radar and leaves price reaction fields marked `Pending`.
 
-## Signal study
+## Automatic signal study
 
-The app does not treat its Mover Score as a proven trading signal. A catalyst with a live quote can be added to a fixed paper-test protocol:
+The server records every filing it sees and applies one fixed bullish baseline:
 
-- Snapshot the alert price, score, direction, and time before recording the result
-- Use a 2% directional target, 1% stop, and 60-minute maximum horizon
-- Record whether the target or stop happened first, or whether the test expired
-- Review win rate and average result in R after at least 100 completed examples
+- Filing is no more than 30 minutes old when evaluated
+- A quote newer than the filing is available
+- Current-day move is at least +2%
+- Offering and dilution filings are excluded
+- Eligible signals use a +2% target, -1% stop, and 60-minute horizon
 
-Study records currently live in that browser's local storage. The result buttons are a manual research tool, not automatic market verification. A production version should store candidates centrally and label outcomes from timestamped historical bars so results cannot be selected with hindsight.
+No manual outcome buttons are used. The server captures real Finnhub quote snapshots while it is awake and labels target, stop, expiration, or incomplete data automatically. A valid expiration requires at least 20 snapshots. This is not minute-bar verification and may miss prices touched between snapshots.
+
+The paper account starts at $1,000, uses $100 per completed signal, and subtracts an estimated 0.30% round-trip cost. It does not model exact spreads, halts, taxes, borrow availability, or concurrent position limits.
+
+## Persistence
+
+The default ledger path is `./data/signal-ledger.json`. Set `DATA_DIR` to another writable directory when needed. The file survives normal local restarts, but Render's default filesystem is ephemeral and may reset after a deploy or instance replacement. Durable production evidence requires a persistent disk or external database.
 
 ## Product direction
 
-The next milestones are expanding the live data and making validation automatic:
+The next milestones are improving data durability and result accuracy:
 
 - SEC EDGAR filings for primary-source filing alerts
 - Nasdaq halt RSS for halt/resume events
-- A paid market data/news API for prices, relative volume, broader news, and historical reaction testing
-- Server-side storage for every candidate and its original feature snapshot
+- Durable cloud storage for every candidate and its original feature snapshot
+- A market-data provider with one-minute OHLCV, relative volume, bid/ask spreads, and historical bars
 - Automatic target/stop/expiration labels from one-minute historical bars
-- Score calibration by catalyst type, market cap, float, time of day, and liquidity
+- Out-of-sample reporting by catalyst type, price, time of day, and liquidity without changing the baseline rules mid-sample
