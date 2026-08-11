@@ -201,11 +201,30 @@ let soundOn = true;
 let dataMode = "demo";
 let watchlist = JSON.parse(localStorage.getItem("catalyst-radar-watchlist") || "[]");
 let notes = JSON.parse(localStorage.getItem("catalyst-radar-notes") || "[]");
-let studies = JSON.parse(localStorage.getItem("catalyst-radar-studies") || "[]");
+let evidenceSignals = [];
+let evidenceProtocol = null;
+let evidencePersistence = null;
+let evidenceSummary = {
+  totalRecorded: 0,
+  tracking: 0,
+  waiting: 0,
+  excluded: 0,
+  incomplete: 0,
+  completed: 0,
+  target: 0,
+  stop: 0,
+  expired: 0,
+  winRate: null,
+  averageNetReturn: null,
+  paperBalance: 1000,
+  paperPnl: 0,
+  maxDrawdown: 0,
+  evidenceLevel: "collecting"
+};
 let activeView = "start";
 
 const $ = (id) => document.getElementById(id);
-const money = (n) => Number.isFinite(n) ? `$${Number(n).toFixed(2)}` : "—";
+const money = (n) => Number.isFinite(n) ? `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—";
 const signed = (n, suffix = "%") => Number.isFinite(n) ? `${n > 0 ? "+" : ""}${n.toFixed(1)}${suffix}` : "Pending";
 const metric = (n, suffix = "") => Number.isFinite(n) ? `${Number(n).toFixed(1)}${suffix}` : "Pending";
 
@@ -286,26 +305,70 @@ function setView(view, scroll = true) {
   }
 }
 
-function renderBeginnerShortlist() {
-  const uniqueSymbols = new Set();
-  const shortlist = catalysts
-    .filter(event => event.ageMinutes <= 10080 && primarySource(event))
-    .sort((a, b) => reactionScore(b) - reactionScore(a))
-    .filter(event => !uniqueSymbols.has(event.symbol) && uniqueSymbols.add(event.symbol))
-    .slice(0, 4);
+function fallbackEvidence(event) {
+  if (!primarySource(event)) {
+    return { status: "excluded", reason: "This demo item does not have the primary source required by the fixed baseline." };
+  }
+  if (event.category === "Offering / Dilution") {
+    return { status: "excluded", reason: "Offering or dilution filings are excluded from the bullish baseline." };
+  }
+  if (event.ageMinutes > 30) {
+    return { status: "excluded", reason: "The filing is outside the fixed 30-minute freshness window." };
+  }
+  if (!Number.isFinite(event.price)) {
+    return { status: "waiting", reason: "A current quote is required before automatic tracking can begin." };
+  }
+  if (!Number.isFinite(event.move) || event.move < 2) {
+    return { status: "waiting", reason: "Current-day price activity has not reached the fixed +2% threshold." };
+  }
+  return { status: "tracking", reason: "Fresh filing and the fixed price-activity gate both passed." };
+}
 
+function evidenceFor(event) {
+  return event.evidence || evidenceSignals.find(signal => signal.id === event.id) || fallbackEvidence(event);
+}
+
+function evidenceMeta(status) {
+  const states = {
+    tracking: { label: "Confirmed activity", tone: "confirmed", bucket: "confirmed" },
+    target: { label: "Target recorded", tone: "target", bucket: "confirmed" },
+    stop: { label: "Stop recorded", tone: "stop", bucket: "confirmed" },
+    expired: { label: "Expired", tone: "expired", bucket: "confirmed" },
+    incomplete: { label: "Incomplete data", tone: "incomplete", bucket: "excluded" },
+    excluded: { label: "Excluded from test", tone: "excluded", bucket: "excluded" },
+    waiting: { label: "Waiting", tone: "waiting", bucket: "waiting" }
+  };
+  return states[status] || states.waiting;
+}
+
+function renderEvidenceBoard() {
+  const unique = new Set();
+  const current = [...catalysts]
+    .sort((a, b) => a.ageMinutes - b.ageMinutes)
+    .filter(event => !unique.has(event.symbol) && unique.add(event.symbol));
+  const groups = { confirmed: [], waiting: [], excluded: [] };
+  for (const event of current) {
+    const evidence = evidenceFor(event);
+    groups[evidenceMeta(evidence.status).bucket].push({ event, evidence });
+  }
+
+  $("confirmed-count").textContent = groups.confirmed.length;
+  $("waiting-count").textContent = groups.waiting.length;
+  $("excluded-count").textContent = groups.excluded.length;
   $("nav-radar-count").textContent = catalysts.length;
-  $("beginner-shortlist").innerHTML = shortlist.length ? shortlist.map(event => {
-    const context = beginnerContext(event);
-    return `<article class="queue-card">
-      <div class="queue-card-top"><span class="queue-label ${context.tone}">${context.label}</span><span class="queue-time">${displayTime(event)}</span></div>
-      <div class="queue-symbol"><div><strong>${event.symbol}</strong><span>${event.company}</span></div><b>${reactionScore(event)}<small> rank</small></b></div>
-      <h3>${context.title}</h3>
-      <p>${context.explanation}</p>
-      <div class="queue-metrics"><span>Day move <b class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</b></span><span>Source <b>${event.source}</b></span></div>
-      <button data-explain-id="${event.id}">Explain this filing</button>
-    </article>`;
-  }).join("") : `<div class="journal-empty">The feed is connected, but there are no recent primary-source filings in the current seven-day window.</div>`;
+
+  for (const [bucket, entries] of Object.entries(groups)) {
+    const container = $(`${bucket}-list`);
+    container.innerHTML = entries.length ? entries.slice(0, 4).map(({ event, evidence }) => {
+      const meta = evidenceMeta(evidence.status);
+      return `<button class="evidence-card" data-explain-id="${event.id}">
+        <div class="evidence-card-head"><strong>${event.symbol}</strong><span class="evidence-status ${meta.tone}">${meta.label}</span></div>
+        <span class="evidence-company">${event.company}</span>
+        <p>${evidence.reason}</p>
+        <div class="evidence-card-meta"><span>${event.category}</span><b class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</b></div>
+      </button>`;
+    }).join("") : `<div class="evidence-empty">No filings in this state right now.</div>`;
+  }
 
   document.querySelectorAll("[data-explain-id]").forEach(button => {
     button.addEventListener("click", () => {
@@ -363,10 +426,14 @@ function matches(event, f) {
 
 function renderRadar() {
   const filters = getFilters();
-  const events = catalysts.filter(event => matches(event, filters)).sort((a, b) => reactionScore(b) - reactionScore(a));
+  const statusOrder = { tracking: 0, target: 1, stop: 1, expired: 1, waiting: 2, incomplete: 3, excluded: 4 };
+  const events = catalysts.filter(event => matches(event, filters)).sort((a, b) => {
+    const statusDifference = (statusOrder[evidenceFor(a).status] ?? 5) - (statusOrder[evidenceFor(b).status] ?? 5);
+    return statusDifference || a.ageMinutes - b.ageMinutes;
+  });
   $("match-count").textContent = `${events.length} catalyst${events.length === 1 ? "" : "s"}`;
-  $("names-in-play").textContent = events.length;
-  $("top-catalyst").textContent = events[0]?.symbol || "None";
+  $("names-in-play").textContent = evidenceSummary.tracking || catalysts.filter(event => evidenceFor(event).status === "tracking").length;
+  $("top-catalyst").textContent = evidenceSummary.completed;
   $("urgent-count").textContent = catalysts.filter(event => event.ageMinutes <= 30).length;
   $("empty-state").hidden = events.length > 0;
   $("show-recent").hidden = events.length > 0 || filters.maxAge >= 10080;
@@ -377,16 +444,18 @@ function renderRadar() {
       : "Try resetting the filters. SEC activity is often quiet on weekends and market holidays.";
   }
   $("radar-body").innerHTML = events.map(event => {
-    const score = reactionScore(event);
+    const evidence = evidenceFor(event);
+    const status = evidenceMeta(evidence.status);
+    const age = event.ageMinutes < 60 ? `${event.ageMinutes}m` : event.ageMinutes < 1440 ? `${Math.floor(event.ageMinutes / 60)}h` : `${Math.floor(event.ageMinutes / 1440)}d`;
     return `<tr data-id="${event.id}" class="${selectedId === event.id ? "selected" : ""}">
       <td class="ticker-cell"><strong>${event.symbol}</strong><span>${event.company}</span></td>
+      <td><span class="evidence-status ${status.tone}">${status.label}</span></td>
       <td><span class="setup-badge">${event.category}</span></td>
       <td>${event.source}</td>
       <td>${displayTime(event)}</td>
       <td class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</td>
-      <td>${metric(event.volume, "x")}</td>
       <td><span class="risk ${event.risk.toLowerCase().replace(" ", "-")}">${event.risk}</span></td>
-      <td><span class="score ${score >= 80 ? "high" : ""}">${score}</span></td>
+      <td>${age}</td>
     </tr>`;
   }).join("");
 
@@ -402,7 +471,7 @@ function renderRadar() {
     $("detail-content").hidden = true;
     $("detail-placeholder").hidden = false;
   }
-  renderBeginnerShortlist();
+  renderEvidenceBoard();
 }
 
 function selectEvent(id, rerender = true) {
@@ -410,21 +479,19 @@ function selectEvent(id, rerender = true) {
   if (rerender) renderRadar();
   const event = catalysts.find(item => item.id === id);
   if (!event) return;
-  const score = reactionScore(event);
   const context = beginnerContext(event);
+  const evidence = evidenceFor(event);
+  const status = evidenceMeta(evidence.status);
   const watched = watchlist.includes(event.id);
-  const existingStudy = studies.find(study => study.id === event.id);
-  const canStartStudy = Number.isFinite(event.price) && event.price > 0;
-  const studyButtonLabel = existingStudy
-    ? existingStudy.status === "open" ? "Paper test in progress" : `Paper test logged: ${outcomeLabel(existingStudy.outcome)}`
-    : canStartStudy ? "Start 60-minute paper test" : "Live quote required for paper test";
+  const catalystSignal = event.category === "Other Filing" ? "Needs review" : event.category === "Offering / Dilution" ? "Dilution risk" : "Relevant filing";
+  const momentumSignal = evidence.status === "tracking" ? "Activity confirmed" : Number.isFinite(event.move) ? signed(event.move) : "Quote pending";
   $("detail-placeholder").hidden = true;
   $("detail-content").hidden = false;
   $("detail-content").innerHTML = `
     <div class="detail-head">
       <div class="detail-symbol">
         <div><span class="company">${event.company} · ${event.sector}</span><h2>${event.symbol}</h2></div>
-        <span class="detail-rank ${score >= 80 ? "high" : ""}"><b>${score}</b><small>attention rank</small></span>
+        <span class="evidence-status detail-status ${status.tone}">${status.label}</span>
       </div>
       <div class="detail-price"><strong>${money(event.price)}</strong><span class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</span></div>
       <div class="quote-source">${event.marketDataProvider ? `Current quote via ${event.marketDataProvider}` : "Quote data pending"}</div>
@@ -441,6 +508,13 @@ function selectEvent(id, rerender = true) {
         <span>BEGINNER TRANSLATION · ${context.label.toUpperCase()}</span>
         <h3>${context.title}</h3>
         <p>${context.explanation}</p>
+      </div>
+
+      <div class="signal-verdict">
+        <div><span>Catalyst</span><strong>${catalystSignal}</strong></div>
+        <div><span>Price activity</span><strong>${momentumSignal}</strong></div>
+        <div><span>Risk</span><strong>${event.risk}</strong></div>
+        <p><b>${status.label}:</b> ${evidence.reason}</p>
       </div>
 
       <div class="score-breakdown">
@@ -464,7 +538,7 @@ function selectEvent(id, rerender = true) {
         <h3>What to check next</h3>
         <div><b>1</b><span><strong>Read the original source</strong>${context.next}</span></div>
         <div><b>2</b><span><strong>Confirm the market response</strong>${Number.isFinite(event.move) ? `The current day move is ${signed(event.move)}, but that does not prove this filing caused it.` : "Quote context is still pending, so do not assume the market reacted."}</span></div>
-        <div><b>3</b><span><strong>Save evidence, not a prediction</strong>Add it to your watchlist or start a paper test. The app does not place an order.</span></div>
+        <div><b>3</b><span><strong>Let the fixed rule collect evidence</strong>Eligible signals are tracked automatically. You never choose the result after seeing what happened.</span></div>
       </div>
 
       <div class="risk-box">
@@ -476,12 +550,12 @@ function selectEvent(id, rerender = true) {
 
       <button class="paper-button" id="watch-button">${watched ? "Remove from watchlist" : "Add to watchlist"}</button>
       <button class="secondary-button" id="note-button">Save research note</button>
-      <button class="study-button" id="study-button" ${existingStudy || !canStartStudy ? "disabled" : ""}>${studyButtonLabel}</button>
-      <p class="study-button-help">Records a timestamped price snapshot before the result is known. No order is placed.</p>
+      <button class="study-button" id="results-button">View automatic results</button>
+      <p class="study-button-help">Quote-snapshot results are educational evidence, not trade instructions or minute-bar verification.</p>
     </div>`;
   $("watch-button").addEventListener("click", () => toggleWatch(event.id));
   $("note-button").addEventListener("click", () => saveNote(event));
-  $("study-button").addEventListener("click", () => startStudy(event));
+  $("results-button").addEventListener("click", () => setView("research"));
 }
 
 function toggleWatch(id) {
@@ -508,7 +582,7 @@ function renderWatchlist() {
   $("watch-count").textContent = watchlist.length;
   $("watch-count-duplicate").textContent = watchlist.length;
   $("note-count").textContent = notes.length;
-  $("nav-research-count").textContent = watchlist.length + notes.length + studies.length;
+  $("nav-research-count").textContent = evidenceSummary.completed;
   $("watchlist").innerHTML = watchlist.length ? watchlist.map(id => {
     const event = catalysts.find(item => item.id === id);
     if (!event) return "";
@@ -530,107 +604,57 @@ function renderWatchlist() {
     </article>`).join("") : `<div class="journal-empty">Save notes from catalyst details to build a research history.</div>`;
 }
 
-function startStudy(event) {
-  if (studies.some(study => study.id === event.id)) {
-    toast("This catalyst is already in the study");
-    return;
-  }
-  if (!Number.isFinite(event.price) || event.price <= 0) {
-    toast("Connect live quotes before starting a paper test");
-    return;
-  }
+function renderResults() {
+  const remaining = Math.max(0, 100 - evidenceSummary.completed);
+  const pnlPrefix = evidenceSummary.paperPnl > 0 ? "+" : evidenceSummary.paperPnl < 0 ? "-" : "";
+  const pnlAmount = Math.abs(evidenceSummary.paperPnl).toFixed(2);
+  const evidenceLabels = {
+    collecting: remaining ? `Need ${remaining} more completed tests` : "Collecting evidence",
+    preliminary: "Preliminary sample",
+    interesting: "Interesting sample",
+    "larger sample": "Larger sample"
+  };
 
-  const direction = event.move < 0 ? "Bearish" : "Bullish";
-  const multiplier = direction === "Bullish" ? 1 : -1;
-  studies.unshift({
-    id: event.id,
-    symbol: event.symbol,
-    company: event.company,
-    category: event.category,
-    score: reactionScore(event),
-    direction,
-    entryPrice: event.price,
-    targetPrice: event.price * (1 + multiplier * 0.02),
-    stopPrice: event.price * (1 - multiplier * 0.01),
-    alertAt: event.updatedIso || new Date().toISOString(),
-    startedAt: new Date().toISOString(),
-    horizonMinutes: 60,
-    status: "open",
-    outcome: null,
-    rMultiple: null
-  });
-  saveStudies();
-  renderStudy();
-  selectEvent(event.id);
-  toast("Paper test started. No trade was placed.");
-}
+  $("study-count").textContent = evidenceSummary.totalRecorded;
+  $("tracking-count").textContent = evidenceSummary.tracking;
+  $("completed-count").textContent = `${evidenceSummary.completed} / 100`;
+  $("win-rate").textContent = Number.isFinite(evidenceSummary.winRate) ? `${evidenceSummary.winRate.toFixed(1)}%` : "Pending";
+  $("study-status").textContent = evidenceLabels[evidenceSummary.evidenceLevel] || "Collecting evidence";
+  $("sample-progress-bar").style.width = `${Math.min(100, evidenceSummary.completed)}%`;
+  $("nav-research-count").textContent = evidenceSummary.completed;
+  $("paper-balance").textContent = money(evidenceSummary.paperBalance);
+  $("paper-pnl").textContent = `${pnlPrefix}$${pnlAmount}`;
+  $("paper-pnl").className = evidenceSummary.paperPnl > 0 ? "up" : evidenceSummary.paperPnl < 0 ? "down" : "";
+  $("average-result").textContent = Number.isFinite(evidenceSummary.averageNetReturn) ? signed(evidenceSummary.averageNetReturn) : "Pending";
+  $("max-drawdown").textContent = evidenceSummary.maxDrawdown < 0 ? `-$${Math.abs(evidenceSummary.maxDrawdown).toFixed(2)}` : "$0.00";
+  $("target-count").textContent = evidenceSummary.target;
+  $("stop-count").textContent = evidenceSummary.stop;
+  $("expired-count").textContent = evidenceSummary.expired;
+  $("incomplete-count").textContent = evidenceSummary.incomplete;
+  $("data-quality-banner").textContent = evidencePersistence?.warning
+    ? `Quote-snapshot testing only. ${evidencePersistence.warning}`
+    : "Quote-snapshot testing only. Minute-bar verification and durable cloud storage are not connected yet.";
 
-function completeStudy(id, outcome) {
-  const resultMap = { target: 2, stop: -1, expired: 0 };
-  studies = studies.map(study => study.id === id ? {
-    ...study,
-    status: "completed",
-    outcome,
-    rMultiple: resultMap[outcome],
-    completedAt: new Date().toISOString()
-  } : study);
-  saveStudies();
-  renderStudy();
-  if (selectedId === id) selectEvent(id);
-  toast(`Paper result logged: ${outcomeLabel(outcome)}`);
-}
-
-function outcomeLabel(outcome) {
-  return { target: "Target first", stop: "Stop first", expired: "Expired" }[outcome] || "Open";
-}
-
-function saveStudies() {
-  localStorage.setItem("catalyst-radar-studies", JSON.stringify(studies));
-}
-
-function renderStudy() {
-  const completed = studies.filter(study => study.status === "completed");
-  const wins = completed.filter(study => study.outcome === "target").length;
-  const averageR = completed.length
-    ? completed.reduce((total, study) => total + study.rMultiple, 0) / completed.length
-    : null;
-  const remaining = Math.max(0, 100 - completed.length);
-
-  $("study-count").textContent = studies.length;
-  $("completed-count").textContent = `${completed.length} / 100`;
-  $("win-rate").textContent = completed.length ? `${Math.round((wins / completed.length) * 100)}%` : "Pending";
-  $("expectancy").textContent = Number.isFinite(averageR) ? `${averageR >= 0 ? "+" : ""}${averageR.toFixed(2)}R` : "Pending";
-  $("study-status").textContent = remaining ? `Need ${remaining} more completed test${remaining === 1 ? "" : "s"}` : "Baseline ready for review";
-  $("sample-progress-bar").style.width = `${Math.min(100, completed.length)}%`;
-  $("clear-study").disabled = !completed.length;
-  $("nav-research-count").textContent = watchlist.length + notes.length + studies.length;
-
-  $("study-list").innerHTML = studies.length ? studies.slice(0, 12).map(study => {
-    const completedClass = study.status === "completed" ? `result-${study.outcome}` : "result-open";
-    return `<article class="study-card ${completedClass}">
+  const automaticSignals = evidenceSignals.filter(signal => signal.startedAt || signal.status === "incomplete");
+  $("study-list").innerHTML = automaticSignals.length ? automaticSignals.slice(0, 20).map(signal => {
+    const meta = evidenceMeta(signal.status);
+    const started = signal.startedAt ? new Date(signal.startedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "Not started";
+    const result = Number.isFinite(signal.resultReturnPercent) ? signed(signal.resultReturnPercent) : signal.status === "tracking" ? "Tracking" : "Not counted";
+    return `<article class="study-card result-${signal.status}">
       <div class="study-card-head">
-        <div><strong>${study.symbol}</strong><span>${study.category}</span></div>
-        <b>${study.status === "completed" ? outcomeLabel(study.outcome) : "Open"}</b>
+        <div><strong>${signal.symbol}</strong><span>${signal.category}</span></div>
+        <b class="evidence-status ${meta.tone}">${meta.label}</b>
       </div>
-      <div class="study-card-meta">
-        <span>${study.direction}</span><span>Score ${study.score}</span><span>${new Date(study.startedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
-      </div>
+      <div class="study-card-meta"><span>Bullish baseline</span><span>${signal.observationCount || 0} snapshots</span><span>${started}</span></div>
       <div class="study-prices">
-        <div><span>Entry</span><strong>${money(study.entryPrice)}</strong></div>
-        <div><span>Target</span><strong>${money(study.targetPrice)}</strong></div>
-        <div><span>Stop</span><strong>${money(study.stopPrice)}</strong></div>
+        <div><span>Entry</span><strong>${money(signal.alertPrice)}</strong></div>
+        <div><span>Target</span><strong>${money(signal.targetPrice)}</strong></div>
+        <div><span>Stop</span><strong>${money(signal.stopPrice)}</strong></div>
       </div>
-      ${study.status === "open" ? `<div class="outcome-actions">
-        <button class="win" data-study-id="${study.id}" data-outcome="target">Target first (+2R)</button>
-        <button class="loss" data-study-id="${study.id}" data-outcome="stop">Stop first (-1R)</button>
-        <button data-study-id="${study.id}" data-outcome="expired">Expired (0R)</button>
-      </div>` : `<p class="study-result">Recorded result: <strong>${study.rMultiple > 0 ? "+" : ""}${study.rMultiple}R</strong></p>`}
+      <div class="study-evidence-row"><span>Max up <b>${signed(signal.maxGainPercent)}</b></span><span>Max down <b>${signed(signal.maxLossPercent)}</b></span><span>Result <b>${result}</b></span></div>
+      <p class="study-result">${signal.reason}</p>
     </article>`;
-  }).join("") : `<div class="journal-empty">Select a catalyst with a live quote, then start a paper test. The first 100 completed examples form the baseline sample.</div>`;
-
-  document.querySelectorAll("[data-study-id]").forEach(button => {
-    button.addEventListener("click", () => completeStudy(button.dataset.studyId, button.dataset.outcome));
-  });
+  }).join("") : `<div class="journal-empty">No signal has passed every fixed eligibility gate yet. Waiting and excluded filings are still recorded by the server.</div>`;
 }
 
 function updateLabels() {
@@ -661,6 +685,10 @@ async function loadLiveCatalysts(showToast = false) {
     if (payload.catalysts?.length) {
       catalysts.splice(0, catalysts.length, ...payload.catalysts);
       dataMode = payload.mode;
+      evidenceSignals = payload.evidence?.signals || [];
+      evidenceProtocol = payload.evidence?.protocol || null;
+      evidencePersistence = payload.evidence?.persistence || null;
+      evidenceSummary = { ...evidenceSummary, ...(payload.evidence?.summary || {}) };
       selectedId = catalysts.some(event => event.id === selectedId) ? selectedId : catalysts[0].id;
       const hasQuotes = payload.marketData?.provider && ["live", "cached"].includes(payload.marketData.status);
       $("feed-mode-label").textContent = hasQuotes ? "LIVE SEC + QUOTES" : "LIVE SEC FEED";
@@ -669,6 +697,7 @@ async function loadLiveCatalysts(showToast = false) {
       $("last-scan").textContent = `${hasQuotes ? "SEC+quotes" : "SEC"} ${new Date(payload.generatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${providerNote}`;
       renderRadar();
       renderWatchlist();
+      renderResults();
       if (showToast) toast(hasQuotes ? `Loaded ${payload.count} filings with quote enrichment` : `Loaded ${payload.count} SEC filings`);
       return;
     }
@@ -679,6 +708,7 @@ async function loadLiveCatalysts(showToast = false) {
     $("data-status").textContent = "Demo";
     $("last-scan").textContent = "SEC unavailable";
     renderRadar();
+    renderResults();
     if (showToast) toast(error.message);
   }
 }
@@ -723,20 +753,11 @@ $("sound-toggle").addEventListener("click", () => {
   soundOn = !soundOn;
   $("sound-toggle").textContent = soundOn ? "Alerts on" : "Alerts off";
 });
-$("clear-study").addEventListener("click", () => {
-  const completedCount = studies.filter(study => study.status === "completed").length;
-  if (!completedCount || !window.confirm(`Remove ${completedCount} completed paper test${completedCount === 1 ? "" : "s"}? Open tests will remain.`)) return;
-  studies = studies.filter(study => study.status !== "completed");
-  saveStudies();
-  renderStudy();
-  toast("Completed paper tests cleared");
-});
-
 setView("start", false);
 updateLabels();
 renderRadar();
 renderWatchlist();
-renderStudy();
+renderResults();
 updateClock();
 setInterval(updateClock, 1000);
 loadLiveCatalysts(true);
