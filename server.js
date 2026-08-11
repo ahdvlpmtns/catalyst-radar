@@ -9,10 +9,259 @@ const HOST = process.env.HOST || "127.0.0.1";
 const SEC_USER_AGENT = process.env.SEC_USER_AGENT || "CatalystRadarMVP/0.1 contact: local-dev@example.com";
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY || "";
 const FORMS = ["8-K", "S-1", "424B5", "424B3", "SC 13D", "SC 13G", "10-Q", "10-K"];
+const DATA_DIR = process.env.DATA_DIR || path.join(root, "data");
+const LEDGER_FILE = path.join(DATA_DIR, "signal-ledger.json");
+const PROTOCOL = Object.freeze({
+  version: "quote-snapshot-v1",
+  direction: "bullish",
+  freshnessMinutes: 30,
+  minimumDayMovePercent: 2,
+  targetPercent: 2,
+  stopPercent: -1,
+  horizonMinutes: 60,
+  minimumExpirationSnapshots: 20,
+  paperStartingBalance: 1000,
+  paperPositionDollars: 100,
+  estimatedRoundTripCostPercent: 0.3
+});
 
 let catalystCache = { at: 0, payload: null };
 let tickerMapCache = { at: 0, map: new Map() };
 let quoteCache = { at: 0, map: new Map(), error: null };
+let signalLedger = loadSignalLedger();
+let trackerBusy = false;
+
+function emptyLedger() {
+  return { version: 1, updatedAt: new Date().toISOString(), signals: {} };
+}
+
+function loadSignalLedger() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(LEDGER_FILE, "utf8"));
+    if (parsed?.version === 1 && parsed.signals && typeof parsed.signals === "object") return parsed;
+  } catch (error) {
+    if (error.code !== "ENOENT") console.warn(`Could not read signal ledger: ${error.message}`);
+  }
+  return emptyLedger();
+}
+
+function saveSignalLedger() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const temporary = `${LEDGER_FILE}.tmp`;
+    signalLedger.updatedAt = new Date().toISOString();
+    fs.writeFileSync(temporary, JSON.stringify(signalLedger, null, 2));
+    fs.renameSync(temporary, LEDGER_FILE);
+  } catch (error) {
+    console.warn(`Could not persist signal ledger: ${error.message}`);
+  }
+}
+
+function percentageChange(price, entryPrice) {
+  if (!Number.isFinite(price) || !Number.isFinite(entryPrice) || entryPrice <= 0) return null;
+  return ((price - entryPrice) / entryPrice) * 100;
+}
+
+function eligibilityFor(event) {
+  if (event.category === "Offering / Dilution") {
+    return { status: "excluded", reason: "Offering or dilution filings are excluded from the bullish baseline." };
+  }
+  if (event.ageMinutes > PROTOCOL.freshnessMinutes) {
+    return { status: "excluded", reason: `The filing was already more than ${PROTOCOL.freshnessMinutes} minutes old when reviewed.` };
+  }
+  if (!Number.isFinite(event.price) || event.price <= 0) {
+    return { status: "waiting", reason: "A current quote is required before the fixed test can start." };
+  }
+  if (!event.marketDataAt || Date.parse(event.marketDataAt) < Date.parse(event.updatedIso)) {
+    return { status: "waiting", reason: "The available quote predates the filing, so a market response is not confirmed." };
+  }
+  if (!Number.isFinite(event.move) || event.move < PROTOCOL.minimumDayMovePercent) {
+    return { status: "waiting", reason: `Current-day price activity has not reached the fixed +${PROTOCOL.minimumDayMovePercent}% threshold.` };
+  }
+  return { status: "tracking", reason: "Fresh filing and the fixed price-activity gate both passed." };
+}
+
+function baseSignal(event, observedAt) {
+  return {
+    id: event.id,
+    symbol: event.symbol,
+    company: event.company,
+    category: event.category,
+    source: event.source,
+    sourceUrl: event.sourceUrl,
+    filingAt: event.updatedIso,
+    firstSeenAt: observedAt,
+    lastSeenAt: observedAt,
+    status: "waiting",
+    reason: "Waiting for evaluation.",
+    alertPrice: null,
+    startedAt: null,
+    targetPrice: null,
+    stopPrice: null,
+    latestPrice: Number.isFinite(event.price) ? event.price : null,
+    dayMove: Number.isFinite(event.move) ? event.move : null,
+    observations: [],
+    maxGainPercent: null,
+    maxLossPercent: null,
+    resultReturnPercent: null,
+    completedAt: null
+  };
+}
+
+function addObservation(signal, price, quoteAt) {
+  if (!Number.isFinite(price) || !quoteAt || Date.parse(quoteAt) < Date.parse(signal.startedAt)) return;
+  if (signal.observations.some(item => item.at === quoteAt)) return;
+  const change = percentageChange(price, signal.alertPrice);
+  signal.observations.push({ at: quoteAt, price, changePercent: change });
+  signal.observations = signal.observations.slice(-90);
+  signal.latestPrice = price;
+  const elapsedMinutes = (Date.parse(quoteAt) - Date.parse(signal.startedAt)) / 60000;
+  if (elapsedMinutes > PROTOCOL.horizonMinutes) {
+    const inWindow = signal.observations.filter(item => (Date.parse(item.at) - Date.parse(signal.startedAt)) / 60000 <= PROTOCOL.horizonMinutes);
+    if (inWindow.length < PROTOCOL.minimumExpirationSnapshots) {
+      signal.status = "incomplete";
+      signal.reason = `Only ${inWindow.length} quote snapshots were captured inside the test window; this is not a valid result.`;
+      signal.completedAt = quoteAt;
+    } else {
+      const lastInWindow = inWindow.at(-1);
+      signal.maxGainPercent = Math.max(...inWindow.map(item => item.changePercent));
+      signal.maxLossPercent = Math.min(...inWindow.map(item => item.changePercent));
+      finishSignal(signal, "expired", lastInWindow.changePercent, lastInWindow.at, "Neither threshold appeared in the recorded quote snapshots within 60 minutes.");
+    }
+    return;
+  }
+  signal.maxGainPercent = signal.maxGainPercent === null ? change : Math.max(signal.maxGainPercent, change);
+  signal.maxLossPercent = signal.maxLossPercent === null ? change : Math.min(signal.maxLossPercent, change);
+
+  if (price >= signal.targetPrice) {
+    finishSignal(signal, "target", PROTOCOL.targetPercent, quoteAt, "A recorded quote reached the +2% target.");
+    return;
+  }
+  if (price <= signal.stopPrice) {
+    finishSignal(signal, "stop", PROTOCOL.stopPercent, quoteAt, "A recorded quote reached the -1% stop.");
+    return;
+  }
+
+  if (elapsedMinutes >= PROTOCOL.horizonMinutes) {
+    if (signal.observations.length < PROTOCOL.minimumExpirationSnapshots) {
+      signal.status = "incomplete";
+      signal.reason = `Only ${signal.observations.length} quote snapshots were captured; this is not a valid expiration result.`;
+      signal.completedAt = quoteAt;
+    } else {
+      finishSignal(signal, "expired", change, quoteAt, "Neither threshold appeared in the recorded quote snapshots within 60 minutes.");
+    }
+  }
+}
+
+function finishSignal(signal, status, resultReturnPercent, completedAt, reason) {
+  signal.status = status;
+  signal.resultReturnPercent = resultReturnPercent;
+  signal.completedAt = completedAt;
+  signal.reason = reason;
+}
+
+function updateSignalLedger(catalysts, observedAt) {
+  for (const event of catalysts) {
+    const signal = signalLedger.signals[event.id] || baseSignal(event, observedAt);
+    signal.lastSeenAt = observedAt;
+    signal.latestPrice = Number.isFinite(event.price) ? event.price : signal.latestPrice;
+    signal.dayMove = Number.isFinite(event.move) ? event.move : signal.dayMove;
+    signalLedger.signals[event.id] = signal;
+
+    if (["target", "stop", "expired", "incomplete"].includes(signal.status)) continue;
+    if (signal.startedAt) {
+      addObservation(signal, event.price, event.marketDataAt || observedAt);
+      continue;
+    }
+
+    const eligibility = eligibilityFor(event);
+    signal.status = eligibility.status;
+    signal.reason = eligibility.reason;
+    if (eligibility.status !== "tracking") continue;
+
+    signal.alertPrice = event.price;
+    signal.startedAt = event.marketDataAt || observedAt;
+    signal.targetPrice = event.price * (1 + PROTOCOL.targetPercent / 100);
+    signal.stopPrice = event.price * (1 + PROTOCOL.stopPercent / 100);
+    addObservation(signal, event.price, event.marketDataAt || observedAt);
+  }
+  pruneSignalLedger();
+  saveSignalLedger();
+}
+
+function pruneSignalLedger() {
+  const entries = Object.values(signalLedger.signals).sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
+  signalLedger.signals = Object.fromEntries(entries.slice(0, 1000).map(signal => [signal.id, signal]));
+}
+
+function publicSignal(signal) {
+  if (!signal) return null;
+  return {
+    ...signal,
+    observationCount: signal.observations.length,
+    observations: signal.observations.slice(-65)
+  };
+}
+
+function evidenceSummary() {
+  const signals = Object.values(signalLedger.signals);
+  const completed = signals.filter(signal => ["target", "stop", "expired"].includes(signal.status));
+  const target = completed.filter(signal => signal.status === "target").length;
+  const stop = completed.filter(signal => signal.status === "stop").length;
+  const expired = completed.filter(signal => signal.status === "expired").length;
+  const ordered = [...completed].sort((a, b) => Date.parse(a.completedAt) - Date.parse(b.completedAt));
+  let balance = PROTOCOL.paperStartingBalance;
+  let peak = balance;
+  let maxDrawdown = 0;
+  for (const signal of ordered) {
+    const netPercent = signal.resultReturnPercent - PROTOCOL.estimatedRoundTripCostPercent;
+    balance += PROTOCOL.paperPositionDollars * netPercent / 100;
+    peak = Math.max(peak, balance);
+    maxDrawdown = Math.min(maxDrawdown, balance - peak);
+  }
+  const averageNetReturn = completed.length
+    ? completed.reduce((total, signal) => total + signal.resultReturnPercent - PROTOCOL.estimatedRoundTripCostPercent, 0) / completed.length
+    : null;
+  return {
+    totalRecorded: signals.length,
+    tracking: signals.filter(signal => signal.status === "tracking").length,
+    waiting: signals.filter(signal => signal.status === "waiting").length,
+    excluded: signals.filter(signal => signal.status === "excluded").length,
+    incomplete: signals.filter(signal => signal.status === "incomplete").length,
+    completed: completed.length,
+    target,
+    stop,
+    expired,
+    winRate: completed.length ? target / completed.length * 100 : null,
+    averageNetReturn,
+    paperBalance: balance,
+    paperPnl: balance - PROTOCOL.paperStartingBalance,
+    maxDrawdown,
+    evidenceLevel: completed.length >= 500 ? "larger sample" : completed.length >= 250 ? "interesting" : completed.length >= 100 ? "preliminary" : "collecting"
+  };
+}
+
+function evidencePayload() {
+  return {
+    protocol: PROTOCOL,
+    persistence: {
+      mode: "server-file",
+      warning: "The ledger survives local restarts, but Render's ephemeral filesystem can reset it after a redeploy or instance replacement."
+    },
+    summary: evidenceSummary(),
+    signals: Object.values(signalLedger.signals)
+      .sort((a, b) => Date.parse(b.firstSeenAt) - Date.parse(a.firstSeenAt))
+      .map(publicSignal)
+  };
+}
+
+function attachEvidence(payload) {
+  return {
+    ...payload,
+    catalysts: payload.catalysts.map(event => ({ ...event, evidence: publicSignal(signalLedger.signals[event.id]) })),
+    evidence: evidencePayload()
+  };
+}
 
 function sendJson(res, status, payload) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -270,7 +519,7 @@ function formatEt(iso) {
 }
 
 async function loadCatalysts() {
-  if (catalystCache.payload && Date.now() - catalystCache.at < 60_000) return catalystCache.payload;
+  if (catalystCache.payload && Date.now() - catalystCache.at < 60_000) return attachEvidence(catalystCache.payload);
   const tickerMap = await loadTickerMap();
   const filings = [];
   for (const form of FORMS) {
@@ -284,15 +533,48 @@ async function loadCatalysts() {
     .sort((a, b) => Date.parse(b.updatedIso) - Date.parse(a.updatedIso))
     .slice(0, 80);
   const enriched = await enrichWithQuotes(catalysts);
+  const generatedAt = new Date().toISOString();
+  updateSignalLedger(enriched.catalysts, generatedAt);
   const payload = {
-    mode: enriched.marketData.provider && enriched.marketData.status !== "missing-key" ? "live-sec-quotes" : "live-sec",
-    generatedAt: new Date().toISOString(),
+    mode: ["live", "cached"].includes(enriched.marketData.status) ? "live-sec-quotes" : "live-sec",
+    generatedAt,
     count: enriched.catalysts.length,
     marketData: enriched.marketData,
     catalysts: enriched.catalysts
   };
   catalystCache = { at: Date.now(), payload };
-  return payload;
+  return attachEvidence(payload);
+}
+
+async function refreshActiveSignals() {
+  if (!FINNHUB_API_KEY || trackerBusy) return;
+  const active = Object.values(signalLedger.signals).filter(signal => signal.status === "tracking");
+  if (!active.length) return;
+  trackerBusy = true;
+  try {
+    const bySymbol = new Map();
+    for (const signal of active) {
+      if (!bySymbol.has(signal.symbol)) bySymbol.set(signal.symbol, []);
+      bySymbol.get(signal.symbol).push(signal);
+    }
+    for (const [symbol, signals] of [...bySymbol.entries()].slice(0, 20)) {
+      try {
+        const quote = await fetchFinnhubQuote(symbol);
+        if (quote) {
+          for (const signal of signals) {
+            signal.dayMove = quote.move;
+            addObservation(signal, quote.price, quote.marketDataAt);
+          }
+        }
+      } catch (error) {
+        if (error.message.includes("rate limit")) break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 120));
+    }
+    saveSignalLedger();
+  } finally {
+    trackerBusy = false;
+  }
 }
 
 http.createServer(async (req, res) => {
@@ -307,6 +589,10 @@ http.createServer(async (req, res) => {
     } catch (error) {
       sendJson(res, 502, { mode: "error", error: error.message, generatedAt: new Date().toISOString(), catalysts: [] });
     }
+    return;
+  }
+  if (url.pathname === "/api/evidence") {
+    sendJson(res, 200, evidencePayload());
     return;
   }
 
@@ -328,3 +614,6 @@ http.createServer(async (req, res) => {
   console.log(`Catalyst Radar running at http://${HOST}:${PORT}`);
   console.log("Live SEC feed enabled. Set SEC_USER_AGENT to your app/contact before production use.");
 });
+
+const trackingTimer = setInterval(refreshActiveSignals, 65_000);
+trackingTimer.unref();
