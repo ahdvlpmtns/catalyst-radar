@@ -264,6 +264,41 @@ function beginnerContext(event) {
       explanation: "The agreement could be a contract, partnership, acquisition, or financing. Its value depends on the actual terms and size relative to the company.",
       next: "Read Item 1.01 and determine who the counterparty is, what changed, and whether dollar terms are disclosed."
     },
+    "Acquisition / Control": {
+      label: "Major transaction",
+      tone: "attention",
+      title: "The company disclosed a major ownership or asset change.",
+      explanation: "An acquisition, asset sale, or change in control can reshape the company. The price paid, financing, and new share count determine the likely direction.",
+      next: "Find the deal value, payment method, closing conditions, and any shares being issued."
+    },
+    "Financing / Debt": {
+      label: "Financial risk",
+      tone: "danger",
+      title: "The company's debt or cash obligations changed.",
+      explanation: "New debt may fund growth or signal a cash need. A default or triggering event is more serious. The amount and repayment terms determine the risk.",
+      next: "Find the obligation amount, interest rate, maturity, collateral, and any default language."
+    },
+    "Accounting Warning": {
+      label: "Serious warning",
+      tone: "danger",
+      title: "Earlier financial statements may not be reliable.",
+      explanation: "A non-reliance filing raises uncertainty about numbers investors previously used to value the company and can cause sharp downside volatility.",
+      next: "Read which statements are affected, why, and when corrected numbers are expected."
+    },
+    "Listing Risk": {
+      label: "Exchange warning",
+      tone: "danger",
+      title: "The stock may have an exchange compliance problem.",
+      explanation: "A listing notice may involve share price, delayed reports, or another exchange rule. The deadline and remediation plan determine the severity.",
+      next: "Identify the violated rule, compliance deadline, and the company's proposed remedy."
+    },
+    "Company Update": {
+      label: "Source review",
+      tone: "attention",
+      title: "The company released an update, but direction is not clear yet.",
+      explanation: "Items 7.01 and 8.01 can contain important press releases, presentations, or other events. The item code alone cannot tell you whether the news is good or bad.",
+      next: "Open the filing exhibit and identify the exact announcement before assigning a direction."
+    },
     "Management Change": {
       label: "Leadership update",
       tone: "attention",
@@ -341,34 +376,135 @@ function evidenceMeta(status) {
   return states[status] || states.waiting;
 }
 
+const CATEGORY_ATTENTION = Object.freeze({
+  "Accounting Warning": 30,
+  "Listing Risk": 28,
+  "Offering / Dilution": 27,
+  "Acquisition / Control": 27,
+  "Earnings / Guidance": 25,
+  "Financing / Debt": 24,
+  "Material Agreement": 23,
+  "Ownership / Activist": 20,
+  "Company Update": 16,
+  "Management Change": 14,
+  "Other Filing": 4
+});
+
+function shortAge(event) {
+  if (event.ageMinutes < 60) return `${event.ageMinutes} minutes ago`;
+  if (event.ageMinutes < 1440) return `${Math.floor(event.ageMinutes / 60)} hours ago`;
+  return `${Math.floor(event.ageMinutes / 1440)} days ago`;
+}
+
+function marketSession() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date());
+  const value = type => parts.find(part => part.type === type)?.value;
+  const weekday = value("weekday");
+  const minutes = Number(value("hour")) * 60 + Number(value("minute"));
+  if (["Sat", "Sun"].includes(weekday)) return "closed";
+  if (minutes >= 240 && minutes < 570) return "premarket";
+  if (minutes >= 570 && minutes < 960) return "open";
+  return "closed";
+}
+
+function attentionFor(event) {
+  const evidence = evidenceFor(event);
+  const context = beginnerContext(event);
+  const absoluteMove = Number.isFinite(event.move) ? Math.abs(event.move) : 0;
+  let points = CATEGORY_ATTENTION[event.category] ?? 10;
+  points += primarySource(event) ? 10 : -18;
+  points += event.ageMinutes <= 30 ? 28 : event.ageMinutes <= 240 ? 16 : event.ageMinutes <= 1440 ? 7 : -8;
+  points += absoluteMove >= 5 ? 24 : absoluteMove >= 2 ? 17 : absoluteMove > 0 ? 7 : 0;
+  if (evidence.status === "tracking") points += 10;
+  if (event.category === "Other Filing") points -= 12;
+
+  const level = points >= 65 ? "watch" : points >= 39 ? "keep" : "low";
+  const meta = {
+    watch: { label: "Watch closely", tone: "watch" },
+    keep: { label: "Keep an eye on", tone: "keep" },
+    low: { label: "Low priority", tone: "low" }
+  }[level];
+  const direction = ["Offering / Dilution", "Accounting Warning", "Listing Risk"].includes(event.category) || event.move <= -2
+    ? "Possible downside"
+    : event.move >= 2 ? "Upside activity" : "Direction unclear";
+  const reasons = [
+    `A primary-source ${event.source} filing arrived ${shortAge(event)}.`,
+    ...event.why.slice(0, 2)
+  ];
+  if (Number.isFinite(event.move)) reasons.push(`The connected quote shows a ${signed(event.move)} current-day move.`);
+  const missing = [];
+  if (event.category === "Other Filing") missing.push("the actual event inside the filing");
+  if (!Number.isFinite(event.move)) missing.push("current price confirmation");
+  if (!Number.isFinite(event.volume)) missing.push("relative volume");
+  if (!Number.isFinite(event.spread)) missing.push("bid/ask spread");
+
+  const session = marketSession();
+  const action = level === "low"
+    ? "No action now. Check the source only if you want more context."
+    : session === "premarket"
+      ? "At the open: watch whether price and volume confirm the story. Do not act from the filing alone."
+      : session === "open"
+        ? "Market is open: watch whether activity continues with adequate volume and liquidity."
+        : "At the next open: watch for price and volume confirmation before considering a paper trade.";
+  return { ...meta, level, points, direction, context, reasons, missing, action };
+}
+
 function renderEvidenceBoard() {
   const unique = new Set();
   const current = [...catalysts]
-    .sort((a, b) => a.ageMinutes - b.ageMinutes)
-    .filter(event => !unique.has(event.symbol) && unique.add(event.symbol));
-  const groups = { confirmed: [], waiting: [], excluded: [] };
-  for (const event of current) {
-    const evidence = evidenceFor(event);
-    groups[evidenceMeta(evidence.status).bucket].push({ event, evidence });
-  }
+    .filter(event => !unique.has(event.symbol) && unique.add(event.symbol))
+    .map(event => ({ event, attention: attentionFor(event) }))
+    .sort((a, b) => b.attention.points - a.attention.points || a.event.ageMinutes - b.event.ageMinutes);
+  const counts = current.reduce((total, item) => {
+    total[item.attention.level] += 1;
+    return total;
+  }, { watch: 0, keep: 0, low: 0 });
 
-  $("confirmed-count").textContent = groups.confirmed.length;
-  $("waiting-count").textContent = groups.waiting.length;
-  $("excluded-count").textContent = groups.excluded.length;
+  $("watch-closely-count").textContent = counts.watch;
+  $("keep-eye-count").textContent = counts.keep;
+  $("low-priority-count").textContent = counts.low;
   $("nav-radar-count").textContent = catalysts.length;
+  const answer = dataMode === "demo"
+    ? "The live connection is unavailable, so these are examples only. Do not use demo names to make a real decision."
+    : counts.watch
+      ? `${counts.watch} ${counts.watch === 1 ? "stock has" : "stocks have"} a fresh, specific catalyst with the strongest available evidence. Start there, then verify the source.`
+      : counts.keep
+        ? `Nothing has strong confirmation yet. ${counts.keep} ${counts.keep === 1 ? "name is" : "names are"} worth monitoring while you wait for better evidence.`
+        : "There is no strong watch candidate right now. Doing nothing is a valid result.";
+  $("morning-answer").textContent = answer;
+  $("watch-session").textContent = marketSession() === "premarket"
+    ? "Premarket view: these are names to monitor when regular trading opens."
+    : marketSession() === "open"
+      ? "Market-hours view: confirm that activity is real and liquid before considering a paper test."
+      : "Market is closed: prepare this list for the next regular session.";
 
-  for (const [bucket, entries] of Object.entries(groups)) {
-    const container = $(`${bucket}-list`);
-    container.innerHTML = entries.length ? entries.slice(0, 4).map(({ event, evidence }) => {
-      const meta = evidenceMeta(evidence.status);
-      return `<button class="evidence-card" data-explain-id="${event.id}">
-        <div class="evidence-card-head"><strong>${event.symbol}</strong><span class="evidence-status ${meta.tone}">${meta.label}</span></div>
-        <span class="evidence-company">${event.company}</span>
-        <p>${evidence.reason}</p>
-        <div class="evidence-card-meta"><span>${event.category}</span><b class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</b></div>
-      </button>`;
-    }).join("") : `<div class="evidence-empty">No filings in this state right now.</div>`;
-  }
+  $("morning-list").innerHTML = current.length ? current.slice(0, 8).map(({ event, attention }, index) => `
+    <article class="morning-card tone-${attention.tone}">
+      <div class="morning-card-top">
+        <span class="attention-label ${attention.tone}">${attention.label}</span>
+        <span class="morning-rank">#${index + 1} for attention</span>
+      </div>
+      <div class="morning-symbol-row">
+        <div><strong>${event.symbol}</strong><span>${event.company}</span></div>
+        <div class="morning-move"><b class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</b><small>${attention.direction}</small></div>
+      </div>
+      <span class="morning-category">${event.category} · ${event.source}</span>
+      <h3>${attention.context.title}</h3>
+      <p class="morning-headline">${event.headline}</p>
+      <div class="reason-list">
+        <span>Why it is here</span>
+        ${attention.reasons.map(reason => `<p><i></i>${reason}</p>`).join("")}
+      </div>
+      <p class="missing-data"><b>Still missing:</b> ${attention.missing.length ? attention.missing.join(", ") : "no major field in the current rules"}.</p>
+      <div class="open-action"><span>What you do next</span><strong>${attention.action}</strong></div>
+      <button class="morning-detail-button" data-explain-id="${event.id}">Show me the details</button>
+    </article>`).join("") : `<div class="evidence-empty">No recent filings are available. The app will keep checking automatically.</div>`;
 
   document.querySelectorAll("[data-explain-id]").forEach(button => {
     button.addEventListener("click", () => {

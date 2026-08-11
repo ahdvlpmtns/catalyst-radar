@@ -1,7 +1,7 @@
 {
   "name": "catalyst-radar",
-  "version": "0.5.0",
-  "description": "Live SEC catalyst radar with fixed-rule evidence tracking.",
+  "version": "0.6.0",
+  "description": "Plain-language SEC catalyst watchlist with fixed-rule evidence tracking.",
   "main": "server.js",
   "scripts": {
     "start": "HOST=0.0.0.0 node server.js",

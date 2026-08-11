@@ -30,9 +30,9 @@
   <main>
     <section class="hero">
       <div class="hero-content">
-        <p class="eyebrow">Live catalyst intelligence</p>
-        <h1>Find the story<br>behind the move.</h1>
-        <p class="hero-copy">Track fresh SEC filings, apply one fixed evidence rule, and measure what happens afterward. Built for research and automatic paper testing, never blind trade calls.</p>
+        <p class="eyebrow">Your market-open watchlist</p>
+        <h1>Know what deserves<br>your attention.</h1>
+        <p class="hero-copy">Catalyst Radar finds fresh company filings, explains why they may matter, and tells you what to watch for at the market open. A watch alert is never a command to buy.</p>
         <div class="hero-badges" aria-label="Connected data sources">
           <span><i></i>SEC filings</span>
           <span><i></i>Finnhub quotes</span>
@@ -62,54 +62,50 @@
     </section>
 
     <nav class="workspace-nav" aria-label="Application sections">
-      <button class="nav-tab active" data-view="start"><span>01</span>Start here</button>
+      <button class="nav-tab active" data-view="start"><span>01</span>Morning watch</button>
       <button class="nav-tab" data-view="radar"><span>02</span>Live radar <b id="nav-radar-count">0</b></button>
       <button class="nav-tab" data-view="research"><span>03</span>Results <b id="nav-research-count">0</b></button>
     </nav>
 
     <section class="app-view" id="view-start">
-      <section class="guide-panel">
-        <div class="guide-intro">
-          <p class="eyebrow">The one question</p>
-          <h2>Is there a fresh catalyst and measurable market activity?</h2>
-          <p>The app now applies one fixed research rule automatically. It separates filings that passed the rule, filings still waiting for confirmation, and filings excluded from this specific experiment.</p>
-          <div class="guide-actions">
-            <button class="guide-button" id="open-radar-guide">Open the live radar</button>
-          </div>
+      <section class="morning-intro">
+        <div>
+          <p class="eyebrow">The simple answer</p>
+          <h2>What should I keep an eye on?</h2>
+          <p id="morning-answer">Checking the latest filings and market activity...</p>
         </div>
-        <div class="guide-steps">
-          <article><b>1</b><div><strong>Fresh filing</strong><p>The SEC filing must be no more than 30 minutes old when evaluated.</p></div></article>
-          <article><b>2</b><div><strong>Price activity</strong><p>A newer quote and at least a +2% current-day move are required.</p></div></article>
-          <article><b>3</b><div><strong>Fixed exclusions</strong><p>Offering and dilution filings do not enter this bullish baseline.</p></div></article>
-          <article><b>4</b><div><strong>Automatic tracking</strong><p>Real quote snapshots monitor +2%, -1%, or 60 minutes without hindsight buttons.</p></div></article>
+        <div class="watch-reminder">
+          <strong>WATCH does not mean BUY</strong>
+          <p>The app is choosing what deserves more attention. Wait for price, volume, and liquidity confirmation before even considering a paper trade.</p>
+          <button class="guide-button" id="open-radar-guide">See every filing</button>
         </div>
       </section>
 
-      <section class="shortlist-section evidence-board-section">
+      <section class="shortlist-section morning-watch-section">
         <div class="section-heading start-heading">
           <div>
-            <p class="eyebrow">Live evidence board</p>
-            <h2>What the fixed rule sees</h2>
-            <p class="section-copy">These are research states, not buy or sell instructions. “Confirmed” only means the app observed the required filing and price conditions.</p>
+            <p class="eyebrow">Ranked for attention</p>
+            <h2>Morning watchlist</h2>
+            <p class="section-copy" id="watch-session">The strongest available reasons appear first.</p>
           </div>
           <button class="text-button" id="view-all-radar">View all filings</button>
         </div>
-        <div class="evidence-board">
-          <section class="evidence-column confirmed"><div class="evidence-column-head"><div><span>Confirmed activity</span><small>Rule passed</small></div><b id="confirmed-count">0</b></div><div class="evidence-cards" id="confirmed-list"></div></section>
-          <section class="evidence-column waiting"><div class="evidence-column-head"><div><span>Waiting</span><small>Needs confirmation</small></div><b id="waiting-count">0</b></div><div class="evidence-cards" id="waiting-list"></div></section>
-          <section class="evidence-column excluded"><div class="evidence-column-head"><div><span>Excluded from test</span><small>Fixed rule failed</small></div><b id="excluded-count">0</b></div><div class="evidence-cards" id="excluded-list"></div></section>
+        <div class="morning-counts" aria-label="Morning watchlist summary">
+          <div><span>Watch closely</span><strong id="watch-closely-count">0</strong></div>
+          <div><span>Keep an eye on</span><strong id="keep-eye-count">0</strong></div>
+          <div><span>Low priority</span><strong id="low-priority-count">0</strong></div>
         </div>
+        <div class="morning-list" id="morning-list"></div>
       </section>
 
       <section class="learn-section">
         <div class="section-heading">
-          <div><p class="eyebrow">Plain-language guide</p><h2>What each state means</h2></div>
+          <div><p class="eyebrow">How to use this page</p><h2>Three steps, then stop</h2></div>
         </div>
-        <div class="glossary-grid">
-          <article><span>Confirmed activity</span><strong>The rule passed</strong><p>A fresh filing, a newer quote, and the required current-day price move were all observed. Causation is not proven.</p></article>
-          <article><span>Waiting</span><strong>Not enough evidence</strong><p>The filing may be interesting, but a quote or the fixed price threshold is still missing.</p></article>
-          <article><span>Excluded</span><strong>Outside this experiment</strong><p>The filing is stale or conflicts with the bullish baseline. It does not mean the company is bad.</p></article>
-          <article><span>Result</span><strong>Automatically observed</strong><p>A quote snapshot reached the target or stop, or enough snapshots were collected through expiration.</p></article>
+        <div class="glossary-grid three-step-grid">
+          <article><span>Step 1</span><strong>Read the reasons</strong><p>Understand what happened and whether the information came directly from an SEC filing.</p></article>
+          <article><span>Step 2</span><strong>Wait for confirmation</strong><p>At the open, watch whether price and volume support the story. A catalyst alone is not an entry.</p></article>
+          <article><span>Step 3</span><strong>Paper trade first</strong><p>Use the Results page to judge many signals before risking real money. One winner proves nothing.</p></article>
         </div>
       </section>
     </section>
@@ -134,6 +130,11 @@
             <option>Contract Win</option>
             <option>Earnings / Guidance</option>
             <option>Material Agreement</option>
+            <option>Acquisition / Control</option>
+            <option>Financing / Debt</option>
+            <option>Accounting Warning</option>
+            <option>Listing Risk</option>
+            <option>Company Update</option>
             <option>Management Change</option>
             <option>Ownership / Activist</option>
             <option>Social / Rumor</option>
@@ -293,8 +294,8 @@
   </main>
 
   <footer>
-    <p>Educational prototype only. SEC filings may be live; quotes, historical stats, and market reactions require separate market-data connections and are not investment advice.</p>
-    <span>Catalyst Radar · MVP 0.5</span>
+    <p>Educational research tool only. Watch labels rank available evidence; they do not predict a move, recommend a trade, or guarantee complete market coverage.</p>
+    <span>Catalyst Radar · MVP 0.6</span>
   </footer>
 
   <div class="toast" id="toast" role="status"></div>

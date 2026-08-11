@@ -1,6 +1,6 @@
 # Catalyst Radar
 
-A dependency-free prototype for tracking stock-moving catalysts: news, filings, guidance changes, FDA events, offerings, contracts, rumors, and other events that can move prices.
+A dependency-free prototype that turns fresh SEC filings into a plain-language market-open watchlist and measures what happens after eligible alerts.
 
 ## Run
 
@@ -16,13 +16,15 @@ The default review window is seven days so recent filings remain visible on week
 
 ## Evidence workflow
 
-Version 0.5 separates the app into three clear areas:
+Version 0.6 separates the app into three clear areas:
 
-- **Start Here** groups filings into Confirmed Activity, Waiting, and Excluded From Test
+- **Morning Watch** ranks names as Watch Closely, Keep an Eye On, or Low Priority and gives the reasons, missing data, and next action
 - **Live Radar** contains the complete filing scanner, evidence reason, source links, risks, and plain-language explanations
 - **Results** contains the automatic signal log, sample metrics, simulated account, watchlist, and notes
 
-These states are research classifications, not buy or sell instructions. Confirmed Activity means only that the fixed filing and price gates passed; it does not prove that the filing caused the move.
+The server reads filer-reported 8-K item numbers when they appear in the SEC feed. This allows it to distinguish categories such as financial results, material agreements, leadership changes, securities sales, accounting warnings, and listing notices. Broad items still require a human to read the source.
+
+Watch labels rank the evidence currently available to the app. They are not buy or sell instructions and do not claim a stock will move. That claim can only be evaluated after a sufficiently large out-of-sample result set is collected.
 
 ## Optional quote enrichment
 
@@ -58,6 +60,7 @@ The next milestones are improving data durability and result accuracy:
 
 - SEC EDGAR filings for primary-source filing alerts
 - Nasdaq halt RSS for halt/resume events
+- Broader primary-source company news, earnings-calendar, and regulatory catalyst feeds
 - Durable cloud storage for every candidate and its original feature snapshot
 - A market-data provider with one-minute OHLCV, relative volume, bid/ask spreads, and historical bars
 - Automatic target/stop/expiration labels from one-minute historical bars

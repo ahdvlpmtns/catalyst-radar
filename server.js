@@ -338,7 +338,8 @@ function parseEntries(xml, tickerMap) {
     const company = titleMatch[2].replace(/\s+\(Filer\)$/i, "").trim();
     const cik = titleMatch[3];
     const tickerInfo = tickerMap.get(cik);
-    const classified = classifyFiling(form, summary);
+    const filingItems = extractFilingItems(summary);
+    const classified = classifyFiling(form, summary, filingItems);
     const filedDate = (summary.match(/Filed:\s*(\d{4}-\d{2}-\d{2})/) || [])[1] || updated.slice(0, 10);
     const ageMinutes = Math.max(0, Math.round((Date.now() - Date.parse(updated)) / 60000));
     if (!tickerInfo?.ticker) continue;
@@ -353,7 +354,7 @@ function parseEntries(xml, tickerMap) {
       updatedIso: updated,
       time: formatEt(updated),
       ageMinutes,
-      headline: `${company} filed ${form}`,
+      headline: `${company}: ${classified.headline}`,
       summary: classified.summary,
       filingSummary: summary,
       filedDate,
@@ -366,6 +367,7 @@ function parseEntries(xml, tickerMap) {
       risk: classified.risk,
       flags: classified.flags,
       why: classified.why,
+      filingItems,
       history: null,
       live: true
     });
@@ -450,13 +452,51 @@ function applyQuotes(catalysts, quoteMap) {
   });
 }
 
-function classifyFiling(form, summary) {
+const SEC_ITEM_NAMES = Object.freeze({
+  "1.01": "material agreement",
+  "1.02": "termination of an agreement",
+  "2.01": "acquisition or sale of assets",
+  "2.02": "financial results",
+  "2.03": "new financial obligation",
+  "2.04": "triggering event involving an obligation",
+  "2.05": "restructuring costs",
+  "2.06": "material impairment",
+  "3.01": "listing or compliance notice",
+  "3.02": "unregistered sale of securities",
+  "3.03": "change to security-holder rights",
+  "4.01": "change in accountant",
+  "4.02": "non-reliance on prior financial statements",
+  "5.01": "change in control",
+  "5.02": "director or executive change",
+  "5.03": "charter or bylaw change",
+  "5.07": "shareholder vote results",
+  "7.01": "Regulation FD disclosure",
+  "8.01": "other material event",
+  "9.01": "financial statements or exhibits"
+});
+
+function extractFilingItems(summary = "") {
+  const itemSection = summary.match(/Items?\s*:\s*([0-9.,\s]+)/i)?.[1] || "";
+  return [...new Set(itemSection.match(/\d+\.\d+/g) || [])];
+}
+
+function itemReason(items) {
+  const meaningful = items.filter(item => item !== "9.01");
+  if (!meaningful.length) return null;
+  return meaningful.slice(0, 2).map(item => `Item ${item} (${SEC_ITEM_NAMES[item] || "reported event"})`).join(" and ");
+}
+
+function classifyFiling(form, summary, filingItems = []) {
   const text = `${form} ${summary}`.toLowerCase();
+  const hasItem = item => filingItems.includes(item) || text.includes(`item ${item}`);
+  const exactReason = itemReason(filingItems);
+  const sourceReason = exactReason ? `SEC metadata reports ${exactReason}` : `Primary-source ${form} filing`;
   if (form.startsWith("S-1") || form.startsWith("424B")) {
     return {
       category: "Offering / Dilution",
       sentiment: "Negative",
       risk: "High",
+      headline: "securities registration or offering filing",
       flags: ["Potential dilution", "Primary SEC filing", "Market reaction needs price data"],
       summary: "This filing may relate to securities registration or an offering. These can pressure a stock if investors expect dilution.",
       why: ["Primary-source SEC filing", "Financing terms can change investor expectations", "Needs price and volume confirmation"]
@@ -467,48 +507,119 @@ function classifyFiling(form, summary) {
       category: "Ownership / Activist",
       sentiment: "Watch",
       risk: "Medium",
+      headline: "large-holder ownership filing",
       flags: ["Ownership change", "Possible activist interest", "Read filing details"],
       summary: "Ownership filings can matter when a new large holder, activist, or strategic investor appears.",
       why: ["Primary-source ownership filing", "May reveal new investor intent", "Needs issuer and holder context"]
     };
   }
-  if (text.includes("item 2.02") || form === "10-Q" || form === "10-K") {
+  if (hasItem("3.02")) {
+    return {
+      category: "Offering / Dilution",
+      sentiment: "Negative",
+      risk: "High",
+      headline: "unregistered securities sale disclosed",
+      flags: ["Possible dilution", "Read offering terms", "Downside risk"],
+      summary: "An unregistered securities sale can dilute existing holders or signal a financing need. The price, size, and restrictions determine the impact.",
+      why: [sourceReason, "New shares or convertible securities may expand the share count", "Needs financing terms and market confirmation"]
+    };
+  }
+  if (hasItem("4.02")) {
+    return {
+      category: "Accounting Warning",
+      sentiment: "Negative",
+      risk: "High",
+      headline: "prior financial statements may no longer be reliable",
+      flags: ["Accounting reliability warning", "Read the filing immediately", "High uncertainty"],
+      summary: "A non-reliance notice says prior financial statements or an audit report should no longer be relied upon. This can materially change investor confidence.",
+      why: [sourceReason, "Previously reported financial information is in question", "Potentially significant downside catalyst"]
+    };
+  }
+  if (hasItem("3.01")) {
+    return {
+      category: "Listing Risk",
+      sentiment: "Negative",
+      risk: "High",
+      headline: "exchange listing or compliance notice disclosed",
+      flags: ["Possible delisting risk", "Deadline may apply", "Read remediation details"],
+      summary: "A listing notice can concern a bid-price, reporting, or other exchange requirement. The cure period and company's response determine the severity.",
+      why: [sourceReason, "Exchange compliance can affect liquidity and investor confidence", "Possible downside catalyst"]
+    };
+  }
+  if (hasItem("2.02") || form === "10-Q" || form === "10-K") {
     return {
       category: "Earnings / Guidance",
       sentiment: "Watch",
       risk: "Medium",
+      headline: form === "10-Q" ? "quarterly financial report filed" : form === "10-K" ? "annual financial report filed" : "financial results or condition update",
       flags: ["Financial results", "Guidance may be inside exhibits", "Market reaction needs confirmation"],
       summary: "Financial results and guidance updates can change forward expectations, but the direction depends on the actual numbers.",
-      why: ["Primary-source financial filing", "Investors often react to guidance and margins", "Needs comparison to expectations"]
+      why: [sourceReason, "Investors often react to guidance and margins", "Needs comparison to expectations"]
     };
   }
-  if (text.includes("item 1.01")) {
+  if (hasItem("1.01") || hasItem("1.02")) {
     return {
       category: "Material Agreement",
       sentiment: "Watch",
       risk: "Medium",
+      headline: hasItem("1.02") ? "material agreement termination disclosed" : "material agreement disclosed",
       flags: ["Agreement terms may be undisclosed", "Materiality requires context"],
       summary: "Material definitive agreements can move stocks when the deal is large, strategic, or changes the company's business outlook.",
-      why: ["Filed as a material agreement", "Could signal a contract, financing, or partnership", "Needs details from the filing"]
+      why: [sourceReason, "Could signal a contract, financing, or partnership", "Needs details from the filing"]
     };
   }
-  if (text.includes("item 5.02")) {
+  if (hasItem("2.01") || hasItem("5.01")) {
+    return {
+      category: "Acquisition / Control",
+      sentiment: "Watch",
+      risk: "High",
+      headline: "acquisition, asset sale, or control change disclosed",
+      flags: ["Transaction event", "Terms determine direction", "Potentially high volatility"],
+      summary: "A completed acquisition, asset sale, or change in control can reshape the company. Deal value, financing, and dilution determine whether the effect is positive or negative.",
+      why: [sourceReason, "The event may change ownership or the value of the business", "Needs transaction terms and market confirmation"]
+    };
+  }
+  if (hasItem("2.03") || hasItem("2.04")) {
+    return {
+      category: "Financing / Debt",
+      sentiment: hasItem("2.04") ? "Negative" : "Watch",
+      risk: "High",
+      headline: hasItem("2.04") ? "debt triggering event disclosed" : "new financial obligation disclosed",
+      flags: ["Debt event", "Cash impact needs review", "Terms determine severity"],
+      summary: "A new obligation or debt triggering event can change the company's cash needs and risk profile. The amount and repayment terms matter.",
+      why: [sourceReason, "Debt terms can materially change financial risk", "Needs obligation size and market confirmation"]
+    };
+  }
+  if (hasItem("5.02")) {
     return {
       category: "Management Change",
       sentiment: "Watch",
       risk: "Medium",
+      headline: "director or executive change disclosed",
       flags: ["Leadership change", "Context matters", "May be routine"],
       summary: "Leadership changes can matter if a key executive resigns, a turnaround CEO joins, or compensation terms reveal incentives.",
-      why: ["Primary-source governance event", "Can change investor confidence", "Needs reason for departure or appointment"]
+      why: [sourceReason, "Can change investor confidence", "Needs reason for departure or appointment"]
+    };
+  }
+  if (hasItem("7.01") || hasItem("8.01")) {
+    return {
+      category: "Company Update",
+      sentiment: "Watch",
+      risk: "Medium",
+      headline: hasItem("7.01") ? "Regulation FD company update" : "other potentially material event",
+      flags: ["Broad disclosure category", "Exhibit may contain the key news", "Read source before acting"],
+      summary: "This category can contain press releases and other material updates, but the item number alone does not reveal whether the news is positive or negative.",
+      why: [sourceReason, "The attached exhibit may contain new company information", "Direction is unknown until the source is read"]
     };
   }
   return {
     category: "Other Filing",
     sentiment: "Watch",
     risk: "Low",
+    headline: `${form} filing needs review`,
     flags: ["Read filing details", "May be routine", "Market reaction needs confirmation"],
     summary: "This is a fresh SEC filing. It may be routine or important depending on the item text and exhibits.",
-    why: ["Primary-source SEC update", "Fresh information reached the market", "Needs classification and reaction data"]
+    why: [sourceReason, "Fresh information reached the market", "Importance and direction are not established"]
   };
 }
 
@@ -577,7 +688,7 @@ async function refreshActiveSignals() {
   }
 }
 
-http.createServer(async (req, res) => {
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1:4173");
   if (url.pathname === "/health") {
     sendJson(res, 200, { ok: true, service: "catalyst-radar", mode: catalystCache.payload?.mode || "starting" });
@@ -610,10 +721,15 @@ http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": types[path.extname(file)] || "application/octet-stream" });
     res.end(data);
   });
-}).listen(PORT, HOST, () => {
-  console.log(`Catalyst Radar running at http://${HOST}:${PORT}`);
-  console.log("Live SEC feed enabled. Set SEC_USER_AGENT to your app/contact before production use.");
 });
 
-const trackingTimer = setInterval(refreshActiveSignals, 65_000);
-trackingTimer.unref();
+if (require.main === module) {
+  server.listen(PORT, HOST, () => {
+    console.log(`Catalyst Radar running at http://${HOST}:${PORT}`);
+    console.log("Live SEC feed enabled. Set SEC_USER_AGENT to your app/contact before production use.");
+  });
+  const trackingTimer = setInterval(refreshActiveSignals, 65_000);
+  trackingTimer.unref();
+}
+
+module.exports = { classifyFiling, extractFilingItems, itemReason };
