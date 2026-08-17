@@ -1,6 +1,6 @@
 {
   "name": "catalyst-radar",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Plain-language SEC catalyst watchlist with fixed-rule evidence tracking.",
   "main": "server.js",
   "scripts": {

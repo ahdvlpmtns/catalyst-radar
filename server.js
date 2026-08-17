@@ -24,6 +24,8 @@ const PROTOCOL = Object.freeze({
   paperPositionDollars: 100,
   estimatedRoundTripCostPercent: 0.3
 });
+const MAX_LIVE_QUOTE_AGE_MINUTES = 20;
+const QUOTE_BATCH_SIZE = 5;
 
 let catalystCache = { at: 0, payload: null };
 let tickerMapCache = { at: 0, map: new Map() };
@@ -71,6 +73,9 @@ function eligibilityFor(event) {
   }
   if (!Number.isFinite(event.price) || event.price <= 0) {
     return { status: "waiting", reason: "A current quote is required before the fixed test can start." };
+  }
+  if (event.quoteStatus && event.quoteStatus !== "current") {
+    return { status: "waiting", reason: "The provider returned a stale quote, so automatic tracking did not start." };
   }
   if (!event.marketDataAt || Date.parse(event.marketDataAt) < Date.parse(event.updatedIso)) {
     return { status: "waiting", reason: "The available quote predates the filing, so a market response is not confirmed." };
@@ -390,8 +395,25 @@ async function fetchFinnhubQuote(symbol) {
     dayLow: Number.isFinite(quote.l) ? quote.l : null,
     dayOpen: Number.isFinite(quote.o) ? quote.o : null,
     previousClose: Number.isFinite(quote.pc) ? quote.pc : null,
-    marketDataAt: quote.t ? new Date(quote.t * 1000).toISOString() : new Date().toISOString(),
+    marketDataAt: quote.t ? new Date(quote.t * 1000).toISOString() : null,
     marketDataProvider: "Finnhub"
+  };
+}
+
+function isQuoteCandidate(event) {
+  const likelyDerivative = event.symbol.length >= 5 && /(WS|W|U|R)$/.test(event.symbol);
+  return event.sector !== "OTC" && /^[A-Z.]{1,5}$/.test(event.symbol) && !likelyDerivative;
+}
+
+function quoteQuality(quote, event, now = Date.now()) {
+  const quoteTime = Date.parse(quote?.marketDataAt);
+  const filingTime = Date.parse(event?.updatedIso);
+  const ageMinutes = Number.isFinite(quoteTime) ? Math.max(0, (now - quoteTime) / 60000) : null;
+  const afterCatalyst = Number.isFinite(quoteTime) && Number.isFinite(filingTime) && quoteTime >= filingTime;
+  return {
+    ageMinutes,
+    afterCatalyst,
+    status: ageMinutes === null ? "missing-time" : ageMinutes <= MAX_LIVE_QUOTE_AGE_MINUTES ? "current" : "stale"
   };
 }
 
@@ -402,33 +424,61 @@ async function enrichWithQuotes(catalysts) {
 
   const now = Date.now();
   if (quoteCache.map.size && now - quoteCache.at < 60_000) {
-    return { catalysts: applyQuotes(catalysts, quoteCache.map), marketData: { provider: "Finnhub", status: "cached", error: quoteCache.error } };
+    const enriched = applyQuotes(catalysts, quoteCache.map);
+    const freshQuotes = new Set(enriched.filter(event => event.quoteStatus === "current").map(event => event.symbol)).size;
+    const staleQuotes = new Set(enriched.filter(event => event.quoteStatus && event.quoteStatus !== "current").map(event => event.symbol)).size;
+    return {
+      catalysts: enriched,
+      marketData: {
+        provider: "Finnhub",
+        status: "cached",
+        enrichedSymbols: quoteCache.map.size,
+        freshQuotes,
+        staleQuotes,
+        requestedSymbols: quoteCache.map.size,
+        error: quoteCache.error
+      }
+    };
   }
 
-  const symbols = [...new Set(catalysts.map(item => item.symbol))]
-    .filter(symbol => /^[A-Z.]{1,6}$/.test(symbol))
+  const symbols = [...new Set(catalysts.filter(isQuoteCandidate).map(item => item.symbol))]
     .slice(0, 30);
   const map = new Map();
   let error = null;
 
-  for (const symbol of symbols) {
-    try {
-      const quote = await fetchFinnhubQuote(symbol);
-      if (quote) map.set(symbol, quote);
-    } catch (quoteError) {
-      error = quoteError.message;
-      if (quoteError.message.includes("rate limit")) break;
+  for (let index = 0; index < symbols.length; index += QUOTE_BATCH_SIZE) {
+    const batch = symbols.slice(index, index + QUOTE_BATCH_SIZE);
+    const results = await Promise.all(batch.map(async symbol => {
+      try {
+        return { symbol, quote: await fetchFinnhubQuote(symbol), error: null };
+      } catch (quoteError) {
+        return { symbol, quote: null, error: quoteError.message };
+      }
+    }));
+    for (const result of results) {
+      if (result.quote) map.set(result.symbol, result.quote);
+      if (result.error) error = result.error;
     }
-    await new Promise(resolve => setTimeout(resolve, 120));
+    if (results.some(result => result.error?.includes("rate limit"))) break;
+    if (index + QUOTE_BATCH_SIZE < symbols.length) await new Promise(resolve => setTimeout(resolve, 250));
   }
 
   quoteCache = { at: Date.now(), map, error };
+  const quality = catalysts.reduce((total, event) => {
+    const quote = map.get(event.symbol);
+    if (!quote) return total;
+    const bucket = quoteQuality(quote, event).status === "current" ? "freshQuotes" : "staleQuotes";
+    total[bucket].add(event.symbol);
+    return total;
+  }, { freshQuotes: new Set(), staleQuotes: new Set() });
   return {
     catalysts: applyQuotes(catalysts, map),
     marketData: {
       provider: "Finnhub",
       status: map.size ? "live" : "unavailable",
       enrichedSymbols: map.size,
+      freshQuotes: quality.freshQuotes.size,
+      staleQuotes: quality.staleQuotes.size,
       requestedSymbols: symbols.length,
       error
     }
@@ -439,15 +489,22 @@ function applyQuotes(catalysts, quoteMap) {
   return catalysts.map(item => {
     const quote = quoteMap.get(item.symbol);
     if (!quote) return item;
+    const quality = quoteQuality(quote, item);
+    const quoteMessage = quality.status === "current"
+      ? Number.isFinite(quote.move) ? `Current quote shows a ${quote.move.toFixed(1)}% day move` : "Current quote is connected"
+      : "Provider quote is stale and is not treated as live confirmation";
     return {
       ...item,
       ...quote,
+      marketDataAgeMinutes: quality.ageMinutes,
+      quoteStatus: quality.status,
+      quoteAfterCatalyst: quality.afterCatalyst,
       flags: item.flags
         .filter(flag => flag !== "Market reaction needs price data")
-        .concat(["Quote data connected"]),
+        .concat([quality.status === "current" ? "Current quote connected" : "Stale quote returned by provider"]),
       why: item.why
         .filter(reason => reason !== "Needs price and volume confirmation")
-        .concat([Number.isFinite(quote.move) ? `Quote reaction is ${quote.move.toFixed(1)}%` : "Current quote is connected"])
+        .concat([quoteMessage])
     };
   });
 }
@@ -477,7 +534,8 @@ const SEC_ITEM_NAMES = Object.freeze({
 
 function extractFilingItems(summary = "") {
   const itemSection = summary.match(/Items?\s*:\s*([0-9.,\s]+)/i)?.[1] || "";
-  return [...new Set(itemSection.match(/\d+\.\d+/g) || [])];
+  const labeledItems = [...summary.matchAll(/\bItem\s+(\d+\.\d+)\s*:/gi)].map(match => match[1]);
+  return [...new Set([...(itemSection.match(/\d+\.\d+/g) || []), ...labeledItems])];
 }
 
 function itemReason(items) {
@@ -535,6 +593,17 @@ function classifyFiling(form, summary, filingItems = []) {
       why: [sourceReason, "Previously reported financial information is in question", "Potentially significant downside catalyst"]
     };
   }
+  if (hasItem("4.01")) {
+    return {
+      category: "Auditor Change",
+      sentiment: "Watch",
+      risk: "Medium",
+      headline: "change in independent accountant disclosed",
+      flags: ["Auditor change", "Reason requires review", "Accounting context matters"],
+      summary: "A change in the company's independent accountant can be routine or a warning. Any disagreement, dismissal, or reportable event in the filing matters.",
+      why: [sourceReason, "Auditor changes can affect confidence in financial reporting", "Needs the stated reason and any disagreement details"]
+    };
+  }
   if (hasItem("3.01")) {
     return {
       category: "Listing Risk",
@@ -544,6 +613,17 @@ function classifyFiling(form, summary, filingItems = []) {
       flags: ["Possible delisting risk", "Deadline may apply", "Read remediation details"],
       summary: "A listing notice can concern a bid-price, reporting, or other exchange requirement. The cure period and company's response determine the severity.",
       why: [sourceReason, "Exchange compliance can affect liquidity and investor confidence", "Possible downside catalyst"]
+    };
+  }
+  if (hasItem("2.05") || hasItem("2.06")) {
+    return {
+      category: "Restructuring / Impairment",
+      sentiment: "Negative",
+      risk: "High",
+      headline: hasItem("2.06") ? "material impairment disclosed" : "restructuring or exit costs disclosed",
+      flags: ["Financial charge", "Business outlook may have changed", "Downside risk"],
+      summary: "A restructuring charge or impairment can signal weaker asset values, closures, layoffs, or a change in business expectations.",
+      why: [sourceReason, "The event can reduce reported value or signal operating pressure", "Needs the dollar amount and management explanation"]
     };
   }
   if (hasItem("2.02") || form === "10-Q" || form === "10-K") {
@@ -599,6 +679,17 @@ function classifyFiling(form, summary, filingItems = []) {
       flags: ["Leadership change", "Context matters", "May be routine"],
       summary: "Leadership changes can matter if a key executive resigns, a turnaround CEO joins, or compensation terms reveal incentives.",
       why: [sourceReason, "Can change investor confidence", "Needs reason for departure or appointment"]
+    };
+  }
+  if (hasItem("5.07")) {
+    return {
+      category: "Shareholder Vote",
+      sentiment: "Watch",
+      risk: "Low",
+      headline: "shareholder vote results reported",
+      flags: ["Often routine", "Proposal details matter", "Usually lower priority"],
+      summary: "Shareholder vote results are often routine. They matter more when investors reject a proposal, approve a major transaction, or reveal unusual opposition.",
+      why: [sourceReason, "A vote result is confirmed in a primary source", "Usually low priority unless a consequential proposal had a surprising result"]
     };
   }
   if (hasItem("7.01") || hasItem("8.01")) {
@@ -732,4 +823,4 @@ if (require.main === module) {
   trackingTimer.unref();
 }
 
-module.exports = { classifyFiling, extractFilingItems, itemReason };
+module.exports = { classifyFiling, extractFilingItems, isQuoteCandidate, itemReason, quoteQuality };

@@ -204,6 +204,7 @@ let notes = JSON.parse(localStorage.getItem("catalyst-radar-notes") || "[]");
 let evidenceSignals = [];
 let evidenceProtocol = null;
 let evidencePersistence = null;
+let marketDataSummary = {};
 let evidenceSummary = {
   totalRecorded: 0,
   tracking: 0,
@@ -285,12 +286,33 @@ function beginnerContext(event) {
       explanation: "A non-reliance filing raises uncertainty about numbers investors previously used to value the company and can cause sharp downside volatility.",
       next: "Read which statements are affected, why, and when corrected numbers are expected."
     },
+    "Auditor Change": {
+      label: "Accounting context",
+      tone: "attention",
+      title: "The company changed its independent accountant.",
+      explanation: "This can be routine or concerning. A disagreement, dismissal, or reportable accounting issue matters more than the change by itself.",
+      next: "Read the stated reason and look for any disagreement or reportable event."
+    },
     "Listing Risk": {
       label: "Exchange warning",
       tone: "danger",
       title: "The stock may have an exchange compliance problem.",
       explanation: "A listing notice may involve share price, delayed reports, or another exchange rule. The deadline and remediation plan determine the severity.",
       next: "Identify the violated rule, compliance deadline, and the company's proposed remedy."
+    },
+    "Restructuring / Impairment": {
+      label: "Business pressure",
+      tone: "danger",
+      title: "The company disclosed a restructuring charge or impairment.",
+      explanation: "This can signal closures, layoffs, weaker asset values, or a change in the business outlook. The size and explanation determine the impact.",
+      next: "Find the dollar amount, affected operation, and management's reason for the charge."
+    },
+    "Shareholder Vote": {
+      label: "Usually routine",
+      tone: "neutral",
+      title: "The company reported shareholder voting results.",
+      explanation: "Most vote-result filings are routine and low priority. They matter when a major transaction passes, a proposal fails, or opposition is unexpectedly strong.",
+      next: "Identify the proposals and whether any result was surprising or consequential."
     },
     "Company Update": {
       label: "Source review",
@@ -379,6 +401,7 @@ function evidenceMeta(status) {
 const CATEGORY_ATTENTION = Object.freeze({
   "Accounting Warning": 30,
   "Listing Risk": 28,
+  "Restructuring / Impairment": 28,
   "Offering / Dilution": 27,
   "Acquisition / Control": 27,
   "Earnings / Guidance": 25,
@@ -386,7 +409,9 @@ const CATEGORY_ATTENTION = Object.freeze({
   "Material Agreement": 23,
   "Ownership / Activist": 20,
   "Company Update": 16,
+  "Auditor Change": 15,
   "Management Change": 14,
+  "Shareholder Vote": 3,
   "Other Filing": 4
 });
 
@@ -413,16 +438,39 @@ function marketSession() {
   return "closed";
 }
 
+function quoteState(event) {
+  if (!event.live) return { usable: Number.isFinite(event.move), label: "Demo quote" };
+  const quoteTime = Date.parse(event.marketDataAt);
+  const filingTime = Date.parse(event.updatedIso);
+  const ageMinutes = Number.isFinite(quoteTime) ? Math.max(0, (Date.now() - quoteTime) / 60000) : null;
+  const current = event.quoteStatus ? event.quoteStatus === "current" : ageMinutes !== null && ageMinutes <= 20;
+  const afterCatalyst = typeof event.quoteAfterCatalyst === "boolean"
+    ? event.quoteAfterCatalyst
+    : Number.isFinite(quoteTime) && Number.isFinite(filingTime) && quoteTime >= filingTime;
+  if (!Number.isFinite(event.move) || !Number.isFinite(quoteTime)) return { usable: false, label: "Quote pending" };
+  if (!current) return { usable: false, label: "Stale quote", ageMinutes };
+  if (!afterCatalyst) return { usable: false, label: "Before catalyst", ageMinutes };
+  return { usable: true, label: "Current quote", ageMinutes };
+}
+
+function commonStockCandidate(event) {
+  const likelyDerivative = event.symbol.length >= 5 && /(WS|W|U|R)$/.test(event.symbol);
+  return event.sector !== "OTC" && !likelyDerivative;
+}
+
 function attentionFor(event) {
   const evidence = evidenceFor(event);
   const context = beginnerContext(event);
-  const absoluteMove = Number.isFinite(event.move) ? Math.abs(event.move) : 0;
+  const quote = quoteState(event);
+  const absoluteMove = quote.usable ? Math.abs(event.move) : 0;
   let points = CATEGORY_ATTENTION[event.category] ?? 10;
   points += primarySource(event) ? 10 : -18;
   points += event.ageMinutes <= 30 ? 28 : event.ageMinutes <= 240 ? 16 : event.ageMinutes <= 1440 ? 7 : -8;
   points += absoluteMove >= 5 ? 24 : absoluteMove >= 2 ? 17 : absoluteMove > 0 ? 7 : 0;
   if (evidence.status === "tracking") points += 10;
   if (event.category === "Other Filing") points -= 12;
+  if (event.category === "Shareholder Vote") points -= 12;
+  if (!commonStockCandidate(event)) points -= 30;
 
   const level = points >= 65 ? "watch" : points >= 39 ? "keep" : "low";
   const meta = {
@@ -430,19 +478,23 @@ function attentionFor(event) {
     keep: { label: "Keep an eye on", tone: "keep" },
     low: { label: "Low priority", tone: "low" }
   }[level];
-  const direction = ["Offering / Dilution", "Accounting Warning", "Listing Risk"].includes(event.category) || event.move <= -2
+  const downsideCategory = ["Offering / Dilution", "Accounting Warning", "Listing Risk", "Restructuring / Impairment"].includes(event.category);
+  const direction = downsideCategory || (quote.usable && event.move <= -2)
     ? "Possible downside"
-    : event.move >= 2 ? "Upside activity" : "Direction unclear";
+    : quote.usable && event.move >= 2 ? "Upside activity" : "Direction unclear";
   const reasons = [
     `A primary-source ${event.source} filing arrived ${shortAge(event)}.`,
     ...event.why.slice(0, 2)
   ];
-  if (Number.isFinite(event.move)) reasons.push(`The connected quote shows a ${signed(event.move)} current-day move.`);
+  if (quote.usable) reasons.push(`A current post-catalyst quote shows a ${signed(event.move)} day move.`);
+  if (quote.label === "Stale quote") reasons.push("Finnhub returned an old quote, so its percentage move is not counted.");
+  if (quote.label === "Before catalyst") reasons.push("The available quote predates the filing, so it does not confirm a reaction.");
   const missing = [];
   if (event.category === "Other Filing") missing.push("the actual event inside the filing");
-  if (!Number.isFinite(event.move)) missing.push("current price confirmation");
+  if (!quote.usable) missing.push("fresh post-catalyst price confirmation");
   if (!Number.isFinite(event.volume)) missing.push("relative volume");
   if (!Number.isFinite(event.spread)) missing.push("bid/ask spread");
+  if (!commonStockCandidate(event)) missing.push("ordinary exchange-listed common-stock eligibility");
 
   const session = marketSession();
   const action = level === "low"
@@ -452,7 +504,7 @@ function attentionFor(event) {
       : session === "open"
         ? "Market is open: watch whether activity continues with adequate volume and liquidity."
         : "At the next open: watch for price and volume confirmation before considering a paper trade.";
-  return { ...meta, level, points, direction, context, reasons, missing, action };
+  return { ...meta, level, points, direction, context, reasons, missing, action, quote };
 }
 
 function renderEvidenceBoard() {
@@ -483,6 +535,15 @@ function renderEvidenceBoard() {
     : marketSession() === "open"
       ? "Market-hours view: confirm that activity is real and liquid before considering a paper test."
       : "Market is closed: prepare this list for the next regular session.";
+  const freshQuotes = Number.isFinite(marketDataSummary.freshQuotes)
+    ? marketDataSummary.freshQuotes
+    : new Set(catalysts.filter(event => quoteState(event).usable).map(event => event.symbol)).size;
+  const staleQuotes = Number.isFinite(marketDataSummary.staleQuotes)
+    ? marketDataSummary.staleQuotes
+    : new Set(catalysts.filter(event => quoteState(event).label === "Stale quote").map(event => event.symbol)).size;
+  $("live-data-note").textContent = dataMode === "demo"
+    ? "DEMO MODE: the names below are examples, not live candidates."
+    : `${freshQuotes} fresh quotes connected${staleQuotes ? ` · ${staleQuotes} stale ${staleQuotes === 1 ? "quote was" : "quotes were"} rejected` : ""} · Relative volume and bid/ask spread are not connected yet.`;
 
   $("morning-list").innerHTML = current.length ? current.slice(0, 8).map(({ event, attention }, index) => `
     <article class="morning-card tone-${attention.tone}">
@@ -492,7 +553,7 @@ function renderEvidenceBoard() {
       </div>
       <div class="morning-symbol-row">
         <div><strong>${event.symbol}</strong><span>${event.company}</span></div>
-        <div class="morning-move"><b class="${event.move >= 0 ? "up" : event.move < 0 ? "down" : ""}">${signed(event.move)}</b><small>${attention.direction}</small></div>
+        <div class="morning-move"><b class="${attention.quote.usable && event.move >= 0 ? "up" : attention.quote.usable && event.move < 0 ? "down" : ""}">${attention.quote.usable ? signed(event.move) : attention.quote.label}</b><small>${attention.direction}</small></div>
       </div>
       <span class="morning-category">${event.category} · ${event.source}</span>
       <h3>${attention.context.title}</h3>
@@ -821,6 +882,7 @@ async function loadLiveCatalysts(showToast = false) {
     if (payload.catalysts?.length) {
       catalysts.splice(0, catalysts.length, ...payload.catalysts);
       dataMode = payload.mode;
+      marketDataSummary = payload.marketData || {};
       evidenceSignals = payload.evidence?.signals || [];
       evidenceProtocol = payload.evidence?.protocol || null;
       evidencePersistence = payload.evidence?.persistence || null;
@@ -829,6 +891,8 @@ async function loadLiveCatalysts(showToast = false) {
       const hasQuotes = payload.marketData?.provider && ["live", "cached"].includes(payload.marketData.status);
       $("feed-mode-label").textContent = hasQuotes ? "LIVE SEC + QUOTES" : "LIVE SEC FEED";
       $("data-status").textContent = hasQuotes ? "SEC + Finnhub" : "Live SEC";
+      const freshQuotes = Number.isFinite(payload.marketData?.freshQuotes) ? payload.marketData.freshQuotes : payload.marketData?.enrichedSymbols || 0;
+      $("feed-health").textContent = hasQuotes ? `${freshQuotes} fresh quotes` : "SEC only";
       const providerNote = payload.marketData?.status === "missing-key" ? " · quotes need key" : payload.marketData?.error ? " · quote issue" : "";
       $("last-scan").textContent = `${hasQuotes ? "SEC+quotes" : "SEC"} ${new Date(payload.generatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${providerNote}`;
       renderRadar();
@@ -840,8 +904,10 @@ async function loadLiveCatalysts(showToast = false) {
     throw new Error("No filings returned");
   } catch (error) {
     dataMode = "demo";
+    marketDataSummary = {};
     $("feed-mode-label").textContent = "DEMO FALLBACK";
     $("data-status").textContent = "Demo";
+    $("feed-health").textContent = "Demo fallback";
     $("last-scan").textContent = "SEC unavailable";
     renderRadar();
     renderResults();

@@ -54,7 +54,7 @@
     </section>
 
     <section class="market-strip" aria-label="Catalyst conditions">
-      <div><span>Data feed</span><strong class="positive">Connected</strong></div>
+      <div><span>Data feed</span><strong class="positive" id="feed-health">Connecting</strong></div>
       <div><span>Fresh filings &lt;30m</span><strong id="urgent-count">0</strong></div>
       <div><span>Confirmed activity</span><strong id="names-in-play">0</strong></div>
       <div><span>Completed tests</span><strong id="top-catalyst">0</strong></div>
@@ -95,6 +95,7 @@
           <div><span>Keep an eye on</span><strong id="keep-eye-count">0</strong></div>
           <div><span>Low priority</span><strong id="low-priority-count">0</strong></div>
         </div>
+        <div class="live-data-note" id="live-data-note">Checking quote freshness and coverage...</div>
         <div class="morning-list" id="morning-list"></div>
       </section>
 
@@ -133,7 +134,10 @@
             <option>Acquisition / Control</option>
             <option>Financing / Debt</option>
             <option>Accounting Warning</option>
+            <option>Auditor Change</option>
             <option>Listing Risk</option>
+            <option>Restructuring / Impairment</option>
+            <option>Shareholder Vote</option>
             <option>Company Update</option>
             <option>Management Change</option>
             <option>Ownership / Activist</option>
@@ -295,7 +299,7 @@
 
   <footer>
     <p>Educational research tool only. Watch labels rank available evidence; they do not predict a move, recommend a trade, or guarantee complete market coverage.</p>
-    <span>Catalyst Radar · MVP 0.6</span>
+    <span>Catalyst Radar · MVP 0.6.1</span>
   </footer>
 
   <div class="toast" id="toast" role="status"></div>

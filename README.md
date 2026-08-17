@@ -16,13 +16,15 @@ The default review window is seven days so recent filings remain visible on week
 
 ## Evidence workflow
 
-Version 0.6 separates the app into three clear areas:
+Version 0.6.1 separates the app into three clear areas:
 
 - **Morning Watch** ranks names as Watch Closely, Keep an Eye On, or Low Priority and gives the reasons, missing data, and next action
 - **Live Radar** contains the complete filing scanner, evidence reason, source links, risks, and plain-language explanations
 - **Results** contains the automatic signal log, sample metrics, simulated account, watchlist, and notes
 
 The server reads filer-reported 8-K item numbers when they appear in the SEC feed. This allows it to distinguish categories such as financial results, material agreements, leadership changes, securities sales, accounting warnings, and listing notices. Broad items still require a human to read the source.
+
+Quotes older than 20 minutes or timestamped before the filing are labeled and rejected as live confirmation. The scanner also prioritizes ordinary exchange-listed ticker symbols for the limited quote-request budget and lowers OTC names, units, and warrants on the morning list.
 
 Watch labels rank the evidence currently available to the app. They are not buy or sell instructions and do not claim a stock will move. That claim can only be evaluated after a sufficiently large out-of-sample result set is collected.
 
